@@ -1,0 +1,9 @@
+camera_node:
+  ros__parameters:
+    device: "/dev/video0"
+    capture_width: 2560
+    capture_height: 640
+    eye_width: 640
+    eye_height: 480
+    fps: 30
+    publish_rate: 15.0

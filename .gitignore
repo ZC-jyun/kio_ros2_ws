@@ -1,0 +1,21 @@
+# colcon build output
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Logs
+*.LOG
+*.log
+MUJOCO_LOG.TXT
+
+# IDE
+.vscode/
+.idea/
+
+# Config with local paths/hardware specifics that differ per machine
+/config/

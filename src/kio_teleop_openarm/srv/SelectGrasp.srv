@@ -1,0 +1,4 @@
+int32 obj_idx
+int32 grasp_idx
+---
+bool success

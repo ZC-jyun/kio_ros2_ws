@@ -1,0 +1,3 @@
+string command   # "open", "close", "toggle", "pinch"
+---
+bool success

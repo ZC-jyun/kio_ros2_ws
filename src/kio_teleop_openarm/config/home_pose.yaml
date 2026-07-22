@@ -1,0 +1,20 @@
+# Initial joint positions (radians).
+# Shared by simulator and controller — edit this one file only.
+home_pose:
+  upoo_left_Base_J01: 0.0
+  upoo_left_J02: 0.0
+  upoo_left_J03: 0.0
+  upoo_left_J04: 0.0
+  upoo_left_J05: 0.0
+  upoo_left_J06: 0.0
+  upoo_right_Base_J01: 1.0
+
+  upoo_right_J02: 1.5
+  upoo_right_J03: 0.0
+  upoo_right_J04: 0.0
+  upoo_right_J05: 0.0
+  upoo_right_J06: 0.0
+  upoo_left_finger_left_joint: 0.044
+  upoo_left_finger_right_joint: 0.044
+  upoo_right_finger_left_joint: 0.044
+  upoo_right_finger_right_joint: 0.044

@@ -1,0 +1,9 @@
+motor_bridge:
+  ros__parameters:
+    motor_smoothing: 0.3
+    device_sn: ""
+    kp: [5.0, 5.0, 2.0, 2.0, 1.0, 1.0, 0.5]
+    kd: [0.3, 0.5, 0.5, 0.5, 0.3, 0.3, 0.8]
+    publish_rate: 50.0
+    gripper_open_pos: 5.0
+    gripper_open_value: 0.044

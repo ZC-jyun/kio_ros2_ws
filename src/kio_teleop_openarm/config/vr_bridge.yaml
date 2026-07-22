@@ -1,0 +1,7 @@
+vr_bridge:
+  ros__parameters:
+    resolution: [960, 1280]
+    ngrok: false
+    cert_file: "/home/kiorobot/kio_robot_zzc/openarm-main/teleop_deploy/192.168.0.5+2.pem"
+    key_file: "/home/kiorobot/kio_robot_zzc/openarm-main/teleop_deploy/192.168.0.5+2-key.pem"
+    diag_interval: 5.0

@@ -1,0 +1,28 @@
+controller:
+  ros__parameters:
+    model_type: "upoo_bimanual"
+    position_gain: 1.0
+    orientation_gain: 0.8
+    orientation_weight: 1.0
+    damping: 0.05
+    max_dq: 0.05
+    ik_max_iters: 2
+    ik_tolerance: 0.001
+    joint_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    position_scale: 1.0
+    robot_x: 0.0
+    robot_y: 0.0
+    robot_z: 0.0
+    base_roll_deg: 0.0
+    base_pitch_deg: 0.0
+    base_yaw_deg: 0.0
+    calibration_delay_sec: 5.0
+    enable_gripper: true
+    gripper_open_value: 0.044
+    gripper_close_value: 0.0
+    gripper_close_threshold: 0.05
+    gripper_open_threshold: 0.95
+    gripper_smoothing: 0.15
+    arm_smoothing: 1.0
+    thumb_tip_index: 4
+    index_tip_index: 9

@@ -1,0 +1,7 @@
+string text_prompt
+float32 box_threshold 0.25
+float32 text_threshold 0.20
+---
+DetectionArray detections
+sensor_msgs/Image depth
+bool success

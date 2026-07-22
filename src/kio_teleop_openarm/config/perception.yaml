@@ -1,0 +1,6 @@
+perception_node:
+  ros__parameters:
+    model_path: ""      # e.g. "perception/weights/groundingdino_swint_ogc.pth"
+    config_path: ""     # e.g. "perception/weights/GroundingDINO_SwinT_OGC.py"
+    calib_path: ""      # e.g. config/stereo_calib.npz (from W2 calibration)
+    device: "cuda"      # "cuda" or "cpu"

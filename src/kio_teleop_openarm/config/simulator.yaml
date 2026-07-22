@@ -1,0 +1,17 @@
+simulator:
+  ros__parameters:
+    model_type: "upoo_bimanual"
+    robot_x: 0.0
+    robot_y: 0.0
+    robot_z: 0.0
+    base_roll_deg: 0.0
+    base_pitch_deg: 0.0
+    base_yaw_deg: 0.0
+    gripper_open_value: 0.044
+    stereo_width: 1280
+    stereo_height: 960
+    ipd: 0.064
+    head_camera_y_offset: 0.0
+    head_camera_z_offset: 0.08
+    enable_viewer: true
+    sim_timestep_override: -1.0

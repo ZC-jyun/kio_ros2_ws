@@ -1,0 +1,4 @@
+string demo_type   # "door_open" | "takeout"
+---
+bool success
+string message

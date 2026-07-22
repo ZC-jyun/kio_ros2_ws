@@ -1,0 +1,4 @@
+GraspCandidate candidate
+---
+trajectory_msgs/JointTrajectory trajectory
+bool success
