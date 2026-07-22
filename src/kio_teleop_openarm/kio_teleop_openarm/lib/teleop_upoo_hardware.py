@@ -36,13 +36,15 @@ sys.path.insert(0, str(_TELEVISION_DIR))   # for TeleVision.py, constants_vuer.p
 import upoo_motor_constants as umc
 from pytransform3d import rotations
 
-import mujoco
-import mujoco.viewer
-import openarm_mujoco.v2 as openarm_mujoco
-
-from TeleVision import OpenTeleVision
-from constants_vuer import grd_yup2grd_zup
-from motion_utils import mat_update, fast_mat_inv
+try:
+    import mujoco
+    import mujoco.viewer
+    import openarm_mujoco.v2 as openarm_mujoco
+    from TeleVision import OpenTeleVision
+    from constants_vuer import grd_yup2grd_zup
+    from motion_utils import mat_update, fast_mat_inv
+except ImportError:
+    pass  # Simulation/VR imports — not needed for HardwareMotorBridge
 
 # ── Damiao imports ────────────────────────────────────────────
 _damiao_available = False
