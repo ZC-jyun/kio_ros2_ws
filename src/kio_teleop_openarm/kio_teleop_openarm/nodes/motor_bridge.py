@@ -14,13 +14,10 @@ from std_srvs.srv import Trigger
 _hardware_available = False
 _HardwareMotorBridge = None
 try:
-    import sys
     from pathlib import Path
-    _DP = Path("/home/kiorobot/kio_robot_zzc/openarm-main/teleop_deploy")
-    os.chdir(str(_DP))  # dmcan needs ./dlls/ relative to cwd
-    if str(_DP) not in sys.path:
-        sys.path.insert(0, str(_DP))
-    import teleop_upoo_hardware as _hw_mod
+    _LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
+    os.chdir(str(_LIB_DIR))  # dmcan needs ./dlls/ relative to cwd
+    from kio_teleop_openarm.lib import teleop_upoo_hardware as _hw_mod
     _HardwareMotorBridge = _hw_mod.HardwareMotorBridge
     _hardware_available = True
 except ImportError:

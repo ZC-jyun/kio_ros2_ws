@@ -12,6 +12,7 @@ __pycache__/
 *.LOG
 *.log
 MUJOCO_LOG.TXT
+implementation_plan_*.md
 
 # IDE
 .vscode/
