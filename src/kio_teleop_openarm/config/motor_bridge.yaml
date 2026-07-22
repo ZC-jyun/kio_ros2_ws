@@ -7,3 +7,6 @@ motor_bridge:
     publish_rate: 50.0
     gripper_open_pos: 5.0
     gripper_open_value: 0.044
+    max_vel: [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
+    max_acc: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+    profile_rate: 200.0
