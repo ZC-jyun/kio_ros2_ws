@@ -25,8 +25,8 @@ from std_srvs.srv import Trigger
 from kio_teleop_openarm.lib.auto_grasp_state import (
     AutoGraspController, GraspState, check_grasp_success)
 
-LEFT_FINGER_NAMES = ["upoo_left_finger_left_joint", "upoo_left_finger_right_joint"]
-RIGHT_FINGER_NAMES = ["upoo_right_finger_left_joint", "upoo_right_finger_right_joint"]
+LEFT_FINGER_NAMES = ["upoo_left_openarm_v1_finger_joint1", "upoo_left_openarm_v1_finger_joint2"]
+RIGHT_FINGER_NAMES = ["upoo_right_openarm_v1_finger_joint1", "upoo_right_openarm_v1_finger_joint2"]
 ALL_FINGER_NAMES = LEFT_FINGER_NAMES + RIGHT_FINGER_NAMES
 
 
@@ -221,12 +221,12 @@ class AutoGraspStateNode(Node):
         """Publish safe-position trajectory to /trajectory/playback."""
         jt = JointTrajectory()
         jt.joint_names = [
-            "upoo_left_Base_J01", "upoo_left_J02", "upoo_left_J03",
+            "upoo_left_J01", "upoo_left_J02", "upoo_left_J03",
             "upoo_left_J04", "upoo_left_J05", "upoo_left_J06",
-            "upoo_right_Base_J01", "upoo_right_J02", "upoo_right_J03",
+            "upoo_right_J01", "upoo_right_J02", "upoo_right_J03",
             "upoo_right_J04", "upoo_right_J05", "upoo_right_J06",
-            "upoo_left_finger_left_joint", "upoo_left_finger_right_joint",
-            "upoo_right_finger_left_joint", "upoo_right_finger_right_joint",
+            "upoo_left_openarm_v1_finger_joint1", "upoo_left_openarm_v1_finger_joint2",
+            "upoo_right_openarm_v1_finger_joint1", "upoo_right_openarm_v1_finger_joint2",
         ]
         # L-shape safe position
         safe_q = [

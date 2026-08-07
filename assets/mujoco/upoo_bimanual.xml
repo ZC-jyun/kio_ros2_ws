@@ -1,0 +1,293 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!--
+UPOO 6-DOF Bimanual — mirrored arms, v1-style clean scene.
+
+Left arm:  original UPOO orientation (extends -Y, root at Y=+0.031).
+Right arm: mirrored across XZ plane (extends +Y, root at Y=-0.031).
+-->
+
+<mujoco model="upoo_bimanual">
+  <compiler angle="radian" autolimits="true"
+             meshdir="../meshes"/>
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic">
+    <flag multiccd="enable"/>
+  </option>
+
+  <default>
+    <joint limited="true" damping="0.8" armature="0.01"/>
+    <geom contype="1" conaffinity="1" condim="3"
+          solref="0.005 1" solimp="0.99 0.999 1e-05"
+          friction="1 0.01 0.01"/>
+    <default class="visual">
+      <geom contype="0" conaffinity="0" group="2"/>
+    </default>
+    <default class="collision">
+      <geom contype="1" conaffinity="1" group="3"
+            condim="3" solref="0.005 1" solimp="0.99 0.999 1e-05"
+            friction="1 0.01 0.01"/>
+    </default>
+    <default class="gripper">
+      <geom contype="1" conaffinity="1" group="3"
+            condim="3" solref="0.005 1" solimp="0.99 0.999 1e-05"
+            friction="5.0 1.0 0.1"/>
+    </default>
+  </default>
+
+  <asset>
+
+    <!-- V1 夹爪 OBJ (scale 0.001 = mm→m) -->
+    <mesh name="v1_hand_0"        file="v1_hand_0.obj"   scale="0.001 0.001 0.001"/>
+    <mesh name="v1_hand_1"        file="v1_hand_1.obj"   scale="0.001 0.001 0.001"/>
+    <mesh name="v1_hand_col"      file="v1_hand.stl"     scale="0.001 0.001 0.001"/>
+    <mesh name="v1_finger_0"      file="v1_finger_0.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="v1_finger_0_flip" file="v1_finger_0.obj" scale="0.001 -0.001 0.001"/>
+    <mesh name="v1_finger_1"      file="v1_finger_1.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="v1_finger_1_flip" file="v1_finger_1.obj" scale="0.001 -0.001 0.001"/>
+    <mesh name="v1_finger_col"      file="v1_finger.stl"   scale="0.001 0.001 0.001"/>
+    <mesh name="v1_finger_col_flip" file="v1_finger.stl"   scale="0.001 -0.001 0.001"/>
+
+    <mesh name="mesh_base_link" file="base_link.STL"/>
+    <mesh name="mesh_Link_01"   file="Link_01.STL"/>
+    <mesh name="mesh_Link_02"   file="Link_02.STL"/>
+    <mesh name="mesh_Link_03"   file="Link_03.STL"/>
+    <mesh name="mesh_Link_04"   file="Link_04.STL"/>
+    <mesh name="mesh_Link_05"   file="Link_05.STL"/>
+    <mesh name="mesh_link6_wrist"  file="link6_wrist.STL"/>
+    <mesh name="mesh_finger_upper" file="finger_upper.STL"/>
+    <mesh name="mesh_finger_lower" file="finger_lower.STL"/>
+    <!-- right-arm mirrored meshes (Y-axis flipped) -->
+    <mesh name="mesh_Link_01_right" file="Link_01.STL" scale="1 -1 1"/>
+    <mesh name="mesh_Link_02_right" file="Link_02.STL" scale="1 -1 1"/>
+    <mesh name="mesh_Link_03_right" file="Link_03.STL" scale="1 -1 1"/>
+    <mesh name="mesh_Link_04_right" file="Link_04.STL" scale="1 -1 1"/>
+    <mesh name="mesh_Link_05_right" file="Link_05.STL" scale="1 -1 1"/>
+    <mesh name="mesh_link6_wrist_right" file="link6_wrist.STL" scale="1 -1 1"/>
+  </asset>
+
+  <worldbody>
+
+    <!-- ============================================================
+         CENTRAL PILLAR — both arms mount on this column
+         ============================================================ -->
+    <body name="upoo_pillar" pos="0 0 0">
+      <!-- main column: 80mm x 80mm x 700mm -->
+      <geom name="pillar_main" type="box" pos="0 0 0.35" size="0.04 0.04 0.35"
+            rgba="0.25 0.25 0.30 1" class="visual"/>
+      <geom name="pillar_main_col" type="box" pos="0 0 0.35" size="0.04 0.04 0.35" class="collision"/>
+      <!-- base plate -->
+      <geom name="pillar_base" type="box" pos="0 0 0.005" size="0.06 0.15 0.005"
+            rgba="0.20 0.20 0.25 1" class="visual"/>
+      <geom name="pillar_base_col" type="box" pos="0 0 0.005" size="0.06 0.15 0.005" class="collision"/>
+
+      <!-- ============================================================
+           LEFT ARM (mounted at Y=+0.05, extends +Y outward)
+           ============================================================ -->
+      <body name="upoo_left_base_link" pos="0 0.090 0.70" euler="-1.5708 0 0">
+        <geom name="upoo_left_base_vis" type="mesh" mesh="mesh_base_link" rgba="0.35 0.35 0.45 1" class="visual"/>
+        <geom name="upoo_left_base_col" type="cylinder" size="0.07 0.015" class="collision"/>
+
+        <body name="upoo_left_Link_01" pos="0 0 0">
+          <joint name="upoo_left_Base_J01" type="hinge" axis="0 0 1" range="-2.82 2.82"/>
+          <geom name="upoo_left_L1_vis" type="mesh" mesh="mesh_Link_01_right" rgba="0.4 0.4 0.48 1" class="visual"/>
+          <geom name="upoo_left_L1_col" type="cylinder" size="0.055 0.018" class="collision" mass="0.351"/>
+
+        <body name="upoo_left_Link_02" pos="0 0 0.04176">
+          <joint name="upoo_left_J02" type="hinge" axis="1 0 0" range="-3.14 1.57"/>
+          <geom name="upoo_left_L2_vis" type="mesh" mesh="mesh_Link_02_right" rgba="0.45 0.45 0.53 1" class="visual"/>
+          <geom name="upoo_left_L2_col" type="capsule" size="0.04" fromto="0 0 0 0 0.055 0.007" class="collision" mass="0.672"/>
+
+          <body name="upoo_left_Link_03" pos="0 0.06025 0.00774">
+            <joint name="upoo_left_J03" type="hinge" axis="0 -1 0" range="-2.5 2.5"/>
+            <geom name="upoo_left_L3_vis" type="mesh" mesh="mesh_Link_03_right" rgba="0.5 0.5 0.58 1" class="visual"/>
+            <geom name="upoo_left_L3_col" type="capsule" size="0.035" fromto="0 0 0 0 0.14 0" class="collision" mass="0.760"/>
+
+            <body name="upoo_left_Link_04" pos="0 0.1535 0">
+              <joint name="upoo_left_J04" type="hinge" axis="0 0 -1" range="-0.78 2.6"/>
+              <geom name="upoo_left_L4_vis" type="mesh" mesh="mesh_Link_04_right" rgba="0.55 0.55 0.63 1" class="visual"/>
+              <geom name="upoo_left_L4_col" type="capsule" size="0.03" fromto="0 0 0 0 0.085 0" class="collision" mass="0.550"/>
+
+              <body name="upoo_left_Link_05" pos="0 0.0955 0">
+                <joint name="upoo_left_J05" type="hinge" axis="0 1 0" range="-1.57 1.57"/>
+                <geom name="upoo_left_L5_vis" type="mesh" mesh="mesh_Link_05_right" rgba="0.6 0.6 0.68 1" class="visual"/>
+                <geom name="upoo_left_L5_col" type="capsule" size="0.025" fromto="0 0 0 0 0.04 0" class="collision" mass="0.476"/>
+
+                <body name="upoo_left_Link_06" pos="0 0.0455 0">
+                  <joint name="upoo_left_J06" type="hinge" axis="-1 0 0" range="-1.57 1.57"/>
+                  <geom name="upoo_left_L6_vis" type="mesh" mesh="mesh_link6_wrist_right" rgba="0.65 0.65 0.73 1" class="visual"/>
+                  <geom name="upoo_left_L6_col" type="cylinder" size="0.022 0.012" class="collision" mass="0.773"/>
+
+                  <!-- V1 hand+finger structure under gripper_rot -->
+                  <body name="upoo_left_gripper_rot" pos="0 0 0" euler="0 0 0">
+                    <body name="upoo_left_hand" pos="0 0.1001 0.025">
+                      <inertial pos="0.0 0.002 0.01" mass="0.15" diaginertia="0.0001 0.00025 0.00017"/>
+                      <geom name="upoo_left_hand_col" type="mesh" mesh="v1_hand_col" pos="0.0 0.005 -0.6585" class="gripper" mass="0.08"/>
+                      <geom name="upoo_left_hand_vis_0" type="mesh" mesh="v1_hand_0" pos="0.0 0.005 -0.6585" rgba="0.65 0.65 0.73 1" class="visual"/>
+                      <geom name="upoo_left_hand_vis_1" type="mesh" mesh="v1_hand_1" pos="0.0 0.005 -0.6585" rgba="0.3 0.3 0.35 1" class="visual"/>
+
+                      <body name="upoo_left_hand_tcp" pos="0 -0.0 0.08"/>
+
+                      <body name="upoo_left_finger_right" pos="0 0.00 0.015">
+                        <joint name="upoo_left_finger_right_joint" type="slide" axis="0 -1 0" range="0 0.044"/>
+                        <inertial pos="0.0064528 -0.01702 0.0219685" mass="0.03602545343277134" diaginertia="2.3749999999999997e-06 2.3749999999999997e-06 7.5e-07"/>
+                        <geom name="upoo_left_finger_right_col" type="mesh" mesh="v1_finger_col_flip" pos="0.0 0.05 -0.673001" class="gripper" mass="0.03"/>
+                        <geom name="upoo_left_finger_right_vis_0" type="mesh" mesh="v1_finger_0_flip" pos="0.0 0.05 -0.673001" rgba="0.9 0.4 0.2 1" class="visual"/>
+                        <geom name="upoo_left_finger_right_vis_1" type="mesh" mesh="v1_finger_1_flip" pos="0.0 0.05 -0.673001" rgba="0.9 0.4 0.2 1" class="visual"/>
+                      </body>
+
+                      <body name="upoo_left_finger_left" pos="0 0.012 0.015">
+                        <joint name="upoo_left_finger_left_joint" type="slide" axis="0 1 0" range="0 0.044"/>
+                        <inertial pos="0.0064528 0.01702 0.0219685" mass="0.03602545343277134" diaginertia="2.3749999999999997e-06 2.3749999999999997e-06 7.5e-07"/>
+                        <geom name="upoo_left_finger_left_col" type="mesh" mesh="v1_finger_col" pos="0.0 -0.05 -0.673001" class="gripper" mass="0.03"/>
+                        <geom name="upoo_left_finger_left_vis_0" type="mesh" mesh="v1_finger_0" pos="0.0 -0.05 -0.673001" rgba="0.9 0.4 0.2 1" class="visual"/>
+                        <geom name="upoo_left_finger_left_vis_1" type="mesh" mesh="v1_finger_1" pos="0.0 -0.05 -0.673001" rgba="0.9 0.4 0.2 1" class="visual"/>
+                      </body>
+
+                      <site name="left_ee_control_point" pos="0 0.08 0" size="0.01" rgba="0 1 0 1"/>
+                      <camera name="camera_wrist_left" pos="0.02 0.05 0" xyaxes="1 0 0 0 1 0" fovy="66" resolution="960 600"/>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      </body>  <!-- upoo_left_base_link -->
+
+      <!-- ============================================================
+           RIGHT ARM (mounted at Y=-0.09, mirrored across XZ plane)
+           Mirrored base euler, same kinematics as left arm
+           ============================================================ -->
+      <body name="upoo_right_base_link" pos="0 -0.090 0.70" euler="1.5708 0 3.14159">
+        <geom name="upoo_right_base_vis" type="mesh" mesh="mesh_base_link" rgba="0.35 0.35 0.45 1" class="visual"/>
+        <geom name="upoo_right_base_col" type="cylinder" size="0.07 0.015" class="collision"/>
+
+        <body name="upoo_right_Link_01" pos="0 0 0">
+        <joint name="upoo_right_Base_J01" type="hinge" axis="0 0 1" range="-2.82 2.82"/>
+        <geom name="upoo_right_L1_vis" type="mesh" mesh="mesh_Link_01_right" rgba="0.4 0.4 0.48 1" class="visual"/>
+        <geom name="upoo_right_L1_col" type="cylinder" size="0.055 0.018" class="collision" mass="0.351"/>
+
+        <body name="upoo_right_Link_02" pos="0 0 0.04176">
+          <joint name="upoo_right_J02" type="hinge" axis="-1 0 0" range="-3.14 1.57"/>
+          <geom name="upoo_right_L2_vis" type="mesh" mesh="mesh_Link_02_right" rgba="0.45 0.45 0.53 1" class="visual"/>
+          <geom name="upoo_right_L2_col" type="capsule" size="0.04" fromto="0 0 0 0 0.055 0.007" class="collision" mass="0.672"/>
+
+          <body name="upoo_right_Link_03" pos="0 0.06025 0.00774">
+            <joint name="upoo_right_J03" type="hinge" axis="0 1 0" range="-2.5 2.5"/>
+            <geom name="upoo_right_L3_vis" type="mesh" mesh="mesh_Link_03_right" rgba="0.5 0.5 0.58 1" class="visual"/>
+            <geom name="upoo_right_L3_col" type="capsule" size="0.035" fromto="0 0 0 0 0.14 0" class="collision" mass="0.760"/>
+
+            <body name="upoo_right_Link_04" pos="0 0.1535 0">
+              <joint name="upoo_right_J04" type="hinge" axis="0 0 1" range="-0.78 2.6"/>
+              <geom name="upoo_right_L4_vis" type="mesh" mesh="mesh_Link_04_right" rgba="0.55 0.55 0.63 1" class="visual"/>
+              <geom name="upoo_right_L4_col" type="capsule" size="0.03" fromto="0 0 0 0 0.085 0" class="collision" mass="0.550"/>
+
+              <body name="upoo_right_Link_05" pos="0 0.0955 0">
+                <joint name="upoo_right_J05" type="hinge" axis="0 -1 0" range="-1.57 1.57"/>
+                <geom name="upoo_right_L5_vis" type="mesh" mesh="mesh_Link_05_right" rgba="0.6 0.6 0.68 1" class="visual"/>
+                <geom name="upoo_right_L5_col" type="capsule" size="0.025" fromto="0 0 0 0 0.04 0" class="collision" mass="0.476"/>
+
+                <body name="upoo_right_Link_06" pos="0 0.0455 0">
+                  <joint name="upoo_right_J06" type="hinge" axis="-1 0 0" range="-1.57 1.57"/>
+                  <geom name="upoo_right_L6_vis" type="mesh" mesh="mesh_link6_wrist_right" rgba="0.65 0.65 0.73 1" class="visual"/>
+                  <geom name="upoo_right_L6_col" type="cylinder" size="0.022 0.012" class="collision" mass="0.773"/>
+
+                  <!-- V1 hand+finger structure under gripper_rot -->
+                  <body name="upoo_right_gripper_rot" pos="0 0 0" euler="0 0 0">
+                    <body name="upoo_right_hand" pos="0 0.1001 0.025">
+                      <inertial pos="0.0 0.002 0.01" mass="0.15" diaginertia="0.0001 0.00025 0.00017"/>
+                      <geom name="upoo_right_hand_col" type="mesh" mesh="v1_hand_col" pos="0.0 0.005 -0.6585" class="gripper" mass="0.08"/>
+                      <geom name="upoo_right_hand_vis_0" type="mesh" mesh="v1_hand_0" pos="0.0 0.005 -0.6585" rgba="0.65 0.65 0.73 1" class="visual"/>
+                      <geom name="upoo_right_hand_vis_1" type="mesh" mesh="v1_hand_1" pos="0.0 0.005 -0.6585" rgba="0.3 0.3 0.35 1" class="visual"/>
+
+                      <body name="upoo_right_hand_tcp" pos="0 -0.0 0.08"/>
+
+                      <body name="upoo_right_finger_right" pos="0 0.00 0.015">
+                        <joint name="upoo_right_finger_right_joint" type="slide" axis="0 -1 0" range="0 0.044"/>
+                        <inertial pos="0.0064528 -0.01702 0.0219685" mass="0.03602545343277134" diaginertia="2.3749999999999997e-06 2.3749999999999997e-06 7.5e-07"/>
+                        <geom name="upoo_right_finger_right_col" type="mesh" mesh="v1_finger_col_flip" pos="0.0 0.05 -0.673001" class="gripper" mass="0.03"/>
+                        <geom name="upoo_right_finger_right_vis_0" type="mesh" mesh="v1_finger_0_flip" pos="0.0 0.05 -0.673001" rgba="0.9 0.4 0.2 1" class="visual"/>
+                        <geom name="upoo_right_finger_right_vis_1" type="mesh" mesh="v1_finger_1_flip" pos="0.0 0.05 -0.673001" rgba="0.9 0.4 0.2 1" class="visual"/>
+                      </body>
+
+                      <body name="upoo_right_finger_left" pos="0 0.012 0.015">
+                        <joint name="upoo_right_finger_left_joint" type="slide" axis="0 1 0" range="0 0.044"/>
+                        <inertial pos="0.0064528 0.01702 0.0219685" mass="0.03602545343277134" diaginertia="2.3749999999999997e-06 2.3749999999999997e-06 7.5e-07"/>
+                        <geom name="upoo_right_finger_left_col" type="mesh" mesh="v1_finger_col" pos="0.0 -0.05 -0.673001" class="gripper" mass="0.03"/>
+                        <geom name="upoo_right_finger_left_vis_0" type="mesh" mesh="v1_finger_0" pos="0.0 -0.05 -0.673001" rgba="0.9 0.4 0.2 1" class="visual"/>
+                        <geom name="upoo_right_finger_left_vis_1" type="mesh" mesh="v1_finger_1" pos="0.0 -0.05 -0.673001" rgba="0.9 0.4 0.2 1" class="visual"/>
+                      </body>
+
+                      <site name="right_ee_control_point" pos="0 0.08 0" size="0.01" rgba="1 0 0 1"/>
+                      <camera name="camera_wrist_right" pos="0.02 0.05 0" xyaxes="1 0 0 0 1 0" fovy="66" resolution="960 600"/>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      </body>  <!-- upoo_right_base_link -->
+
+    </body>  <!-- upoo_pillar -->
+
+  </worldbody>
+
+
+  <equality>
+    <joint name="upoo_left_finger_eq" joint1="upoo_left_finger_left_joint" joint2="upoo_left_finger_right_joint"
+           solimp="0.95 0.99 0.001" solref="0.005 1"/>
+    <joint name="upoo_right_finger_eq" joint1="upoo_right_finger_left_joint" joint2="upoo_right_finger_right_joint"
+           solimp="0.95 0.99 0.001" solref="0.005 1"/>
+  </equality>
+
+  <contact>
+    <exclude body1="upoo_left_finger_right" body2="upoo_left_finger_left"/>
+    <exclude body1="upoo_right_finger_right" body2="upoo_right_finger_left"/>
+  </contact>
+
+  <actuator>
+    <position name="upoo_left_Base_J01_ctrl" joint="upoo_left_Base_J01" kp="500" kv="30"
+              ctrllimited="true" ctrlrange="-2.82 2.82" forcerange="-20 20"/>
+    <position name="upoo_left_J02_ctrl" joint="upoo_left_J02" kp="300" kv="30"
+              ctrllimited="true" ctrlrange="-3.14 1.57" forcerange="-25 25"/>
+    <position name="upoo_left_J03_ctrl" joint="upoo_left_J03" kp="150" kv="30"
+              ctrllimited="true" ctrlrange="-2.5 2.5" forcerange="-30 30"/>
+    <position name="upoo_left_J04_ctrl" joint="upoo_left_J04" kp="100" kv="20"
+              ctrllimited="true" ctrlrange="-1.57 2.6" forcerange="-10 10"/>
+    <position name="upoo_left_J05_ctrl" joint="upoo_left_J05" kp="100" kv="20"
+              ctrllimited="true" ctrlrange="-1.57 1.57" forcerange="-10 10"/>
+    <position name="upoo_left_J06_ctrl" joint="upoo_left_J06" kp="80" kv="15"
+              ctrllimited="true" ctrlrange="-1.57 1.57" forcerange="-8 8"/>
+    <position name="upoo_left_finger_right_ctrl" joint="upoo_left_finger_right_joint"
+              kp="100" ctrllimited="true" ctrlrange="0 0.044" forcerange="-333 333"/>
+    <position name="upoo_left_finger_left_ctrl" joint="upoo_left_finger_left_joint"
+              kp="100" ctrllimited="true" ctrlrange="0 0.044" forcerange="-333 333"/>
+
+    <position name="upoo_right_Base_J01_ctrl" joint="upoo_right_Base_J01" kp="500" kv="30"
+              ctrllimited="true" ctrlrange="-2.82 2.82" forcerange="-20 20"/>
+    <position name="upoo_right_J02_ctrl" joint="upoo_right_J02" kp="300" kv="30"
+              ctrllimited="true" ctrlrange="-3.14 0" forcerange="-25 25"/>
+    <position name="upoo_right_J03_ctrl" joint="upoo_right_J03" kp="150" kv="30"
+              ctrllimited="true" ctrlrange="-2.5 2.5" forcerange="-30 30"/>
+    <position name="upoo_right_J04_ctrl" joint="upoo_right_J04" kp="100" kv="20"
+              ctrllimited="true" ctrlrange="-1.57 2.6" forcerange="-10 10"/>
+    <position name="upoo_right_J05_ctrl" joint="upoo_right_J05" kp="100" kv="20"
+              ctrllimited="true" ctrlrange="-1.57 1.57" forcerange="-10 10"/>
+    <position name="upoo_right_J06_ctrl" joint="upoo_right_J06" kp="80" kv="15"
+              ctrllimited="true" ctrlrange="-1.57 1.57" forcerange="-8 8"/>
+    <position name="upoo_right_finger_right_ctrl" joint="upoo_right_finger_right_joint"
+              kp="100" ctrllimited="true" ctrlrange="0 0.044" forcerange="-333 333"/>
+    <position name="upoo_right_finger_left_ctrl" joint="upoo_right_finger_left_joint"
+              kp="100" ctrllimited="true" ctrlrange="0 0.044" forcerange="-333 333"/>
+  </actuator>
+
+  <!-- home: arms hang straight down
+       qpos: left_arm(6) + left_fingers(2) + right_arm(6) + right_fingers(2) = 16 -->
+  <keyframe>
+    <key name="upoo_home"
+         qpos="0 -1.57 0 1.57 0 0 0 0  0 -1.57 0 -1.57 0 0 0 0"/>
+  </keyframe>
+
+</mujoco>

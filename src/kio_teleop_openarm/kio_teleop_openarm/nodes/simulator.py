@@ -36,8 +36,8 @@ RIGHT_ARM_JOINT_NAMES = [
     "upoo_right_Base_J01", "upoo_right_J02", "upoo_right_J03",
     "upoo_right_J04", "upoo_right_J05", "upoo_right_J06",
 ]
-LEFT_FINGER_JOINT_NAMES = ["upoo_left_finger_left_joint", "upoo_left_finger_right_joint"]
-RIGHT_FINGER_JOINT_NAMES = ["upoo_right_finger_left_joint", "upoo_right_finger_right_joint"]
+LEFT_FINGER_JOINT_NAMES = ["upoo_left_finger_right_joint", "upoo_left_finger_left_joint"]
+RIGHT_FINGER_JOINT_NAMES = ["upoo_right_finger_right_joint", "upoo_right_finger_left_joint"]
 LEFT_EE_BODY_NAME = "upoo_left_Link_06"
 RIGHT_EE_BODY_NAME = "upoo_right_Link_06"
 BODY_LINK_NAME = "upoo_left_base_link"
@@ -102,8 +102,9 @@ class SimulatorNode(Node):
         with open(xml_path, 'r') as f:
             xml_str = f.read()
 
-        # Scene defaults (from original)
-        scene_defaults = """
+        # Scene defaults (inject only if not already present in the XML)
+        if "class=\"scene_collision\"" not in xml_str:
+            scene_defaults = """
     <default class="scene_collision">
       <geom contype="1" conaffinity="1" condim="3" solref="0.02 1" solimp="0.9 0.95 0.001" friction="0.5 0.01 0.01"/>
     </default>
@@ -111,7 +112,7 @@ class SimulatorNode(Node):
       <geom contype="1" conaffinity="1" condim="6" solref="0.02 1" solimp="0.9 0.95 0.001" friction="1.5 0.3 0.05"/>
     </default>
 """
-        xml_str = xml_str.replace("<default>", "<default>" + scene_defaults)
+            xml_str = xml_str.replace("<default>", "<default>" + scene_defaults)
 
         if model_type != "upoo_cell":
             scene_injects = self._build_scene()
@@ -153,9 +154,9 @@ class SimulatorNode(Node):
 
         # Finger actuators
         self.left_finger_act = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "upoo_left_finger_ctrl")
+            self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "upoo_left_gripper_ctrl")
         self.right_finger_act = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "upoo_right_finger_ctrl")
+            self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "upoo_right_gripper_ctrl")
 
         # ── Set initial qpos from home_pose.yaml ──
         self._load_home_pose()
@@ -170,11 +171,9 @@ class SimulatorNode(Node):
                 self._cup_body_id = cup_body
                 cup_jnt = self.model.body_jntadr[cup_body]
                 self._cup_qpos_adr = self.model.jnt_qposadr[cup_jnt]
-                self.data.qpos[self._cup_qpos_adr:self._cup_qpos_adr + 7] = np.array(
-                    [0.3, 0.0, 0.49, 1.0, 0.0, 0.0, 0.0], dtype=np.float64)
                 self._cup_init_qpos = self.data.qpos[self._cup_qpos_adr:self._cup_qpos_adr + 7].copy()
                 self.get_logger().info(
-                    f"Cup placed at {self._cup_init_qpos[:3]}, adr={self._cup_qpos_adr}")
+                    f"Cup at {self._cup_init_qpos[:3]}, adr={self._cup_qpos_adr}")
         except Exception:
             pass
 
@@ -224,6 +223,7 @@ class SimulatorNode(Node):
         self.stereo_pub = self.create_publisher(Image, "/stereo_image", 10)
 
         self._latest_target = None
+        self._latest_target_time = None
         self._last_real_time = None
         self._last_n_steps = 0
         self._paused = False
@@ -293,11 +293,11 @@ class SimulatorNode(Node):
             f'    <geom name="axis_y" type="box" size="0.005 1.5 0.002" '
             f'pos="0 0.75 {axis_z}" rgba="0.2 1 0.2 0.9" contype="0" conaffinity="0"/>')
         lines.append(
-            '    <body name="table" pos="0.3 0 0.24">'
-            '<geom name="table_top" type="box" size="0.25 0.2 0.2" rgba="0.5 0.5 0.5 1" class="scene_collision"/>'
+            '    <body name="table" pos="-0.3 0 0.24">'
+            '<geom name="table_top" type="box" size="0.25 0.2 0.18" rgba="0.5 0.5 0.5 1" class="scene_collision"/>'
             '</body>')
         lines.append(
-            '    <body name="cup" pos="0.3 0 0.49">'
+            '    <body name="cup" pos="-0.362 0.17 0.49">'
             '<freejoint/>'
             '<geom name="cup_col" type="box" size="0.025 0.025 0.025" mass="0.05" '
             'rgba="0.9 0.15 0.15 1" class="cup_collision"/>'
@@ -357,7 +357,7 @@ class SimulatorNode(Node):
         (self._cam_left, self._cam_right, self._r_left,
          self._r_right, self._vp) = make_stereo_cameras(
             self.model, self.scene, cam_lookat=lookat, cam_distance=1.0,
-            cam_azimuth=0.0, cam_elevation=-25.0,
+            cam_azimuth=180.0, cam_elevation=-75.0,
             width=self.sw, height=self.sh, ipd=self.ipd)
         self.get_logger().info("Stereo renderer initialized")
 
@@ -372,6 +372,7 @@ class SimulatorNode(Node):
     def _joint_target_cb(self, msg: JointState):
         with self._target_lock:
             self._latest_target = msg
+            self._latest_target_time = time.time()
 
     def _reset_cup_srv_cb(self, request, response):
         if self._cup_qpos_adr >= 0 and self._cup_init_qpos is not None:
@@ -410,14 +411,17 @@ class SimulatorNode(Node):
             self.joint_state_pub.publish(js)
             return
 
-        # Apply latest joint target
-        with self._target_lock:
-            target = self._latest_target
-        if target is not None:
-            self._apply_joint_target(target)
-
         # Real-time stepping
         now = time.time()
+
+        # Apply latest joint target (skip if stale — allows manual viewer control)
+        with self._target_lock:
+            target = self._latest_target
+            target_time = self._latest_target_time
+        if target is not None and target_time is not None:
+            age = now - target_time
+            if age < 0.5:
+                self._apply_joint_target(target)
         sim_timestep = self.model.opt.timestep
         if self._last_real_time is not None:
             real_elapsed = now - self._last_real_time
@@ -478,8 +482,8 @@ class SimulatorNode(Node):
                     self.data.ctrl[i] = name_to_pos[jname]
         # Finger actuators: match by name in JointState
         for finger_name, act_id in [
-            ("upoo_left_finger_left_joint", self.left_finger_act),
-            ("upoo_right_finger_left_joint", self.right_finger_act),
+            ("upoo_left_finger_right_joint", self.left_finger_act),
+            ("upoo_right_finger_right_joint", self.right_finger_act),
         ]:
             if finger_name in name_to_pos:
                 self.data.ctrl[act_id] = name_to_pos[finger_name]

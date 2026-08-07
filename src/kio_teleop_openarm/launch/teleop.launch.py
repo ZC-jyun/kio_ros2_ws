@@ -31,7 +31,7 @@ def generate_launch_description():
         description="Enable perception pipeline (detection + depth + grasp planning)")
 
     model_type_arg = DeclareLaunchArgument(
-        "model_type", default_value="upoo_bimanual",
+        "model_type", default_value="/home/kiorobot/kio_robot_zzc/kio_ros2_ws/assets/mujoco/upoo_openarm_v1_hybrid_cartesian_grasp_scene_v2.xml",
         description="MuJoCo model type or path")
 
     # ── Core teleop (always on) ──
@@ -48,7 +48,8 @@ def generate_launch_description():
         package="kio_teleop_openarm",
         executable="controller.py",
         name="controller",
-        parameters=[os.path.join(config_dir, "controller.yaml")],
+        parameters=[os.path.join(config_dir, "controller.yaml"),
+                    {"model_type": LaunchConfiguration("model_type")}],
         output="screen",
     )
 
@@ -56,7 +57,8 @@ def generate_launch_description():
         package="kio_teleop_openarm",
         executable="simulator.py",
         name="simulator",
-        parameters=[os.path.join(config_dir, "simulator.yaml")],
+        parameters=[os.path.join(config_dir, "simulator.yaml"),
+                    {"model_type": LaunchConfiguration("model_type")}],
         output="screen",
     )
 

@@ -20,3 +20,7 @@ implementation_plan_*.md
 
 # Config with local paths/hardware specifics that differ per machine
 /config/
+
+# Large data / external repos
+act-main/
+data/

@@ -13,12 +13,12 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 
 ALL_JOINT_NAMES = [
-    "upoo_left_Base_J01", "upoo_left_J02", "upoo_left_J03",
+    "upoo_left_J01", "upoo_left_J02", "upoo_left_J03",
     "upoo_left_J04", "upoo_left_J05", "upoo_left_J06",
-    "upoo_right_Base_J01", "upoo_right_J02", "upoo_right_J03",
+    "upoo_right_J01", "upoo_right_J02", "upoo_right_J03",
     "upoo_right_J04", "upoo_right_J05", "upoo_right_J06",
-    "upoo_left_finger_left_joint", "upoo_left_finger_right_joint",
-    "upoo_right_finger_left_joint", "upoo_right_finger_right_joint",
+    "upoo_left_openarm_v1_finger_joint1", "upoo_left_openarm_v1_finger_joint2",
+    "upoo_right_openarm_v1_finger_joint1", "upoo_right_openarm_v1_finger_joint2",
 ]
 
 

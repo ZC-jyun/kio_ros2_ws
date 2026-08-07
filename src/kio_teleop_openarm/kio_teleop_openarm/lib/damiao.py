@@ -282,6 +282,8 @@ class Motor_Control:
         self.read_write_save.clear()
         self._lock = threading.RLock()
         self._param_event = threading.Event()
+        self._param_response_rid: Optional[int] = None
+        self._param_requested_rid: Optional[int] = None
         self.nom_baud = int(nom_baud)
         self.dat_baud = int(dat_baud)
         self.sn = sn
@@ -441,21 +443,33 @@ class Motor_Control:
                 time.sleep(0.002)
 
     def read_motor_param(self, DM_Motor: Motor, RID: int, timeout: float = 1.0):
+        requested_rid = int(RID)
         self.read_write_save.set()
         self._param_event.clear()
+        self._param_response_rid = None
+        self._param_requested_rid = requested_rid
         can_id = DM_Motor.GetCanId()
-        payload = bytes([can_id & 0xFF, (can_id >> 8) & 0xFF, 0x33, int(RID), 0, 0, 0, 0])
+        payload = bytes([can_id & 0xFF, (can_id >> 8) & 0xFF, 0x33, requested_rid, 0, 0, 0, 0])
         self._send(DM_Motor.GetChannel(), 0x7FF, payload)
-        if timeout and self._param_event.wait(timeout):
-            if self.is_in_ranges(RID):
-                return DM_Motor.get_param_as_uint32(RID)
-            return DM_Motor.get_param_as_float(RID)
+        deadline = time.monotonic() + max(0.0, timeout)
+        while timeout and time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            if not self._param_event.wait(remaining):
+                break
+            # A delayed response for an earlier request may wake the event.
+            # Do not return its default value for the currently requested RID.
+            if self._param_response_rid == requested_rid:
+                if self.is_in_ranges(requested_rid):
+                    return DM_Motor.get_param_as_uint32(requested_rid)
+                return DM_Motor.get_param_as_float(requested_rid)
+            self._param_event.clear()
         return None
 
     def save_motor_param(self, DM_Motor: Motor):
         self.control_cmd(DM_Motor.GetCanId() + DM_Motor.GetMotorMode(), 0xFD, DM_Motor.GetChannel())
         time.sleep(0.01)
         self.read_write_save.set()
+        self._param_requested_rid = None
         can_id = DM_Motor.GetCanId()
         payload = bytes([can_id & 0xFF, (can_id >> 8) & 0xFF, 0xAA, 0x01, 0, 0, 0, 0])
         self._send(DM_Motor.GetChannel(), 0x7FF, payload)
@@ -469,15 +483,28 @@ class Motor_Control:
     def control_cmd(self, id: int, cmd: int, ch: int = 0):
         return self._send(ch, id, bytes([0xFF] * 7 + [cmd]))
 
-    def write_motor_param(self, DM_Motor: Motor, RID: int, data):
+    def write_motor_param(self, DM_Motor: Motor, RID: int, data, timeout: float = 1.0):
+        requested_rid = int(RID)
         self.read_write_save.set()
         self._param_event.clear()
+        self._param_response_rid = None
+        self._param_requested_rid = requested_rid
         can_id = DM_Motor.GetCanId()
         data_bytes = bytes(data)
         if len(data_bytes) != 4:
             raise ValueError("data must contain exactly 4 bytes")
-        payload = bytes([can_id & 0xFF, (can_id >> 8) & 0xFF, 0x55, int(RID)]) + data_bytes
-        return self._send(DM_Motor.GetChannel(), 0x7FF, payload)
+        payload = bytes([can_id & 0xFF, (can_id >> 8) & 0xFF, 0x55, requested_rid]) + data_bytes
+        if not self._send(DM_Motor.GetChannel(), 0x7FF, payload):
+            return False
+        deadline = time.monotonic() + max(0.0, timeout)
+        while timeout and time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            if not self._param_event.wait(remaining):
+                break
+            if self._param_response_rid == requested_rid:
+                return True
+            self._param_event.clear()
+        return False
 
     def set_zero_position(self, DM_Motor: Motor):
         self.control_cmd(DM_Motor.GetCanId() + DM_Motor.GetMotorMode(), 0xFE, DM_Motor.GetChannel())
@@ -543,6 +570,7 @@ class Motor_Control:
                     motor.set_mode(mode_map[value])
         else:
             motor.set_param(rid, self.uint8_to_float(list(data[4:8])))
+        self._param_response_rid = int(rid)
         self._param_event.set()
 
     def switchControlMode(self, DM_Motor: Motor, mode: Control_Mode_Code):
@@ -582,9 +610,18 @@ class Motor_Control:
 
             if self.read_write_save.is_set():
                 if len(data) >= 8 and data[2] in (0x33, 0x55, 0xAA):
-                    if data[2] in (0x33, 0x55):
+                    if data[2] == 0xAA:
+                        self.read_write_save.clear()
+                        self._param_requested_rid = None
+                        return
+                    response_rid = int(data[3])
+                    if self._param_requested_rid is None or response_rid == self._param_requested_rid:
                         self.receive_param(data[:8], ch)
-                    self.read_write_save.clear()
+                        self.read_write_save.clear()
+                        self._param_requested_rid = None
+                        return
+                    # Keep waiting for the requested RID. This is a delayed
+                    # response from an earlier parameter transaction.
                     return
 
             motor = self.motors.get((ch, can_id))

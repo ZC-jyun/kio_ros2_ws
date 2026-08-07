@@ -17,11 +17,11 @@ import mujoco
 import openarm_mujoco.v2 as openarm_mujoco
 
 LEFT_ARM_JOINTS = [
-    "upoo_left_Base_J01", "upoo_left_J02", "upoo_left_J03",
+    "upoo_left_J01", "upoo_left_J02", "upoo_left_J03",
     "upoo_left_J04", "upoo_left_J05", "upoo_left_J06",
 ]
 RIGHT_ARM_JOINTS = [
-    "upoo_right_Base_J01", "upoo_right_J02", "upoo_right_J03",
+    "upoo_right_J01", "upoo_right_J02", "upoo_right_J03",
     "upoo_right_J04", "upoo_right_J05", "upoo_right_J06",
 ]
 LEFT_EE_BODY = "upoo_left_Link_06"

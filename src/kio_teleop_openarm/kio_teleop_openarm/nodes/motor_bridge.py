@@ -27,7 +27,7 @@ except ImportError:
 
 ARM_NAMES = ["upoo_right_Base_J01", "upoo_right_J02", "upoo_right_J03",
              "upoo_right_J04", "upoo_right_J05", "upoo_right_J06",
-             "upoo_right_finger_left_joint"]
+             "upoo_right_finger_right_joint"]
 NUM_MOTORS = len(ARM_NAMES)
 
 
@@ -125,6 +125,7 @@ class MotorBridgeNode(Node):
         self.declare_parameter("max_vel", [3.0] * NUM_MOTORS)
         self.declare_parameter("max_acc", [10.0] * NUM_MOTORS)
         self.declare_parameter("profile_rate", 200.0)
+        self.declare_parameter("startup_hold", True)
 
         motor_smoothing = self.get_parameter("motor_smoothing").value
         device_sn = self.get_parameter("device_sn").value or None
@@ -136,15 +137,32 @@ class MotorBridgeNode(Node):
         max_vel = self.get_parameter("max_vel").value
         max_acc = self.get_parameter("max_acc").value
         profile_rate = self.get_parameter("profile_rate").value
+        self._startup_hold = self.get_parameter("startup_hold").value
 
         if not _hardware_available:
             self.get_logger().fatal("Hardware motor bridge not available. Check teleop_upoo_hardware import.")
             raise RuntimeError("HardwareMotorBridge unavailable")
 
+        # ── Step 1-5: CAN init → scan → read pos/vel/torque → hold → enable ──
+        self.get_logger().info("[startup] Initializing CAN + scanning motors...")
         self._bridge = _HardwareMotorBridge(
             kp=kp, kd=kd, motor_smoothing=motor_smoothing, device_sn=device_sn)
         self._bridge.start()
-        self.get_logger().info("Hardware motor bridge started")
+        self.get_logger().info("[startup] Motors enabled, reading state...")
+
+        # Read motor state after enable
+        time.sleep(0.1)
+        pos, vel, torque, errs = self._bridge.get_state()
+        self.get_logger().info(
+            f"[startup] position: {[round(p, 4) for p in pos]}")
+        self.get_logger().info(
+            f"[startup] velocity: {[round(v, 4) for v in vel]}")
+        self.get_logger().info(
+            f"[startup] torque:   {[round(t, 4) for t in torque]}")
+        self.get_logger().info(
+            f"[startup] errors:   {[int(e) for e in errs]}")
+        online = sum(1 for s in pos if abs(s) > 0.0001 or True)
+        self.get_logger().info(f"[startup] {online}/{NUM_MOTORS} motors online")
 
         # Per-joint trapezoidal profiles
         self._profiles = [
@@ -154,13 +172,11 @@ class MotorBridgeNode(Node):
         self._profile_lock = threading.Lock()
         self._profile_active = False
 
-        # Seed profiles with current motor position (read from bridge after start)
-        time.sleep(0.2)  # let motor thread run a few cycles
-        cur_pos, _ = self._bridge.get_state()
+        # Seed profiles with current motor position
         for i in range(NUM_MOTORS):
-            self._profiles[i].reset(float(cur_pos[i]))
+            self._profiles[i].reset(float(pos[i]))
         self.get_logger().info(
-            f"Profiles seeded at {[round(p, 4) for p in cur_pos]}")
+            f"[startup] Profiles seeded at {[round(p, 4) for p in pos]}")
 
         # Background profile stepping thread
         self._profile_thread = threading.Thread(
@@ -186,13 +202,15 @@ class MotorBridgeNode(Node):
     # ── Target callback: replan all profiles ──────────────────────
 
     def _target_cb(self, msg: JointState):
+        if self._startup_hold:
+            return
         if not msg.name or len(msg.name) != len(msg.position):
             return
         targets = []
         for n in ARM_NAMES:
             if n in msg.name:
                 val = float(msg.position[msg.name.index(n)])
-                if n == "upoo_right_finger_left_joint":
+                if n == "upoo_right_finger_right_joint":
                     val = val * (self.gripper_open_pos / max(self.gripper_open_value, 1e-6))
                 targets.append(val)
             else:
@@ -230,13 +248,13 @@ class MotorBridgeNode(Node):
     # ── State publishing ──────────────────────────────────────────
 
     def _publish_state(self):
-        sent, errs = self._bridge.get_state()
+        pos, vel, torque, errs = self._bridge.get_state()
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
-        js.name = ["motor_j1", "motor_j2", "motor_j3", "motor_j4", "motor_j5",
-                   "motor_j6", "motor_gripper"]
-        js.position = [float(s) for s in sent]
-        js.effort = [float(e) for e in errs]
+        js.name = list(ARM_NAMES)
+        js.position = [float(p) for p in pos]
+        js.velocity = [float(v) for v in vel]
+        js.effort = [float(t) for t in torque]
         self.joint_state_pub.publish(js)
 
     # ── Services ──────────────────────────────────────────────────
@@ -244,9 +262,9 @@ class MotorBridgeNode(Node):
     def _estop_cb(self, request, response):
         self._bridge.emergency_stop()
         with self._profile_lock:
-            cur, _ = self._bridge.get_state()
+            pos, _, _, _ = self._bridge.get_state()
             for i, prof in enumerate(self._profiles):
-                prof.reset(float(cur[i]))
+                prof.reset(float(pos[i]))
         response.success = True
         response.message = "Emergency stop executed"
         self.get_logger().warn("EMERGENCY STOP")
@@ -257,6 +275,9 @@ class MotorBridgeNode(Node):
         with self._profile_lock:
             for prof in self._profiles:
                 prof.reset(0.0)
+        if self._startup_hold:
+            self._startup_hold = False
+            self.get_logger().info("Startup hold released, now tracking /joint_target")
         response.success = True
         response.message = "Zero set"
         self.get_logger().info("Zero set for all motors")

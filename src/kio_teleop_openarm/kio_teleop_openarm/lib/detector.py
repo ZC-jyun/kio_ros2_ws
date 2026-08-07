@@ -37,11 +37,17 @@ class ObjectDetector:
             box_threshold=box_threshold,
             text_threshold=text_threshold,
         )
+        h, w = rgb_image.shape[:2]
         results = []
         for box, conf, phrase in zip(boxes, logits, phrases):
+            cx, cy, bw, bh = box.tolist()
+            x1 = int((cx - bw / 2) * w)
+            y1 = int((cy - bh / 2) * h)
+            x2 = int((cx + bw / 2) * w)
+            y2 = int((cy + bh / 2) * h)
             results.append({
                 "class_name": phrase,
-                "bbox": box.tolist(),
+                "bbox": [max(0, x1), max(0, y1), min(w, x2), min(h, y2)],
                 "confidence": float(conf),
             })
         return results

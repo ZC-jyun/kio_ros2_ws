@@ -12,12 +12,12 @@ model = mujoco.MjModel.from_xml_path(xml_path)
 data = mujoco.MjData(model)
 
 # Home: all arm joints at 0, grippers open
-LEFT_ARM = ["upoo_left_Base_J01", "upoo_left_J02", "upoo_left_J03",
+LEFT_ARM = ["upoo_left_J01", "upoo_left_J02", "upoo_left_J03",
             "upoo_left_J04", "upoo_left_J05", "upoo_left_J06"]
-RIGHT_ARM = ["upoo_right_Base_J01", "upoo_right_J02", "upoo_right_J03",
+RIGHT_ARM = ["upoo_right_J01", "upoo_right_J02", "upoo_right_J03",
              "upoo_right_J04", "upoo_right_J05", "upoo_right_J06"]
-FINGERS = ["upoo_left_finger_left_joint", "upoo_left_finger_right_joint",
-           "upoo_right_finger_left_joint", "upoo_right_finger_right_joint"]
+FINGERS = ["upoo_left_openarm_v1_finger_joint1", "upoo_left_openarm_v1_finger_joint2",
+           "upoo_right_openarm_v1_finger_joint1", "upoo_right_openarm_v1_finger_joint2"]
 
 for name in LEFT_ARM + RIGHT_ARM:
     jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)

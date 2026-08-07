@@ -18,8 +18,11 @@ Safety: E=estop, P=calibrate, R=reset cup
 
 import argparse
 import atexit
+import os
 import select
+import signal
 import sys
+import tempfile
 import threading
 import time
 from multiprocessing import Event, Queue, shared_memory
@@ -27,24 +30,35 @@ from pathlib import Path
 
 import numpy as np
 
-# ── Paths (deployment layout: all relative) ──
-_DEPLOY_DIR = Path(__file__).resolve().parent  # teleop_deploy/
+# ── Paths ──
+_LOCAL_LIB_DIR = Path(__file__).resolve().parent
+_WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
+_ROBOT_ROOT = Path(__file__).resolve().parents[5]
+_TOOLS_DIR = _WORKSPACE_ROOT / "tools"
+_UPOO_SOURCE = _ROBOT_ROOT / "kio_upoo-main"
+_DEPLOY_DIR = Path(os.environ.get(
+    "KIO_TELEOP_DEPLOY_DIR",
+    _ROBOT_ROOT / "openarm-main" / "teleop_deploy",
+)).expanduser()
 _TELEVISION_DIR = _DEPLOY_DIR / "television"
-sys.path.insert(0, str(_DEPLOY_DIR))       # for damiao.py, openarm_mujoco/
-sys.path.insert(0, str(_TELEVISION_DIR))   # for TeleVision.py, constants_vuer.py, motion_utils.py
+_DEFAULT_CERT_FILE = _ROBOT_ROOT / "openarm-main" / "teleop" / "cert.pem"
+_DEFAULT_KEY_FILE = _ROBOT_ROOT / "openarm-main" / "teleop" / "key.pem"
+for _path in (_LOCAL_LIB_DIR, _TOOLS_DIR, _UPOO_SOURCE, _DEPLOY_DIR, _TELEVISION_DIR):
+    if str(_path) not in sys.path:
+        sys.path.append(str(_path))
 
 import upoo_motor_constants as umc
 from pytransform3d import rotations
 
+_simulation_import_error = None
 try:
     import mujoco
     import mujoco.viewer
-    import openarm_mujoco.v2 as openarm_mujoco
     from TeleVision import OpenTeleVision
     from constants_vuer import grd_yup2grd_zup
     from motion_utils import mat_update, fast_mat_inv
-except ImportError:
-    pass  # Simulation/VR imports — not needed for HardwareMotorBridge
+except ImportError as exc:
+    _simulation_import_error = exc
 
 # ── Damiao imports ────────────────────────────────────────────
 _damiao_available = False
@@ -57,7 +71,10 @@ except ImportError:
 
 if _dmcan_available:
     try:
-        from damiao import DmActData, DM_Motor_Type, Motor_Control, Control_Mode
+        from damiao import (
+            Control_Mode, Control_Mode_Code, DM_Motor_Type, DM_REG,
+            DmActData, Motor_Control,
+        )
         _damiao_available = True
     except ImportError:
         pass
@@ -145,6 +162,27 @@ def normalized_pinch_metric(landmarks, thumb_tip_index=4, index_tip_index=9):
     return pinch_dist / max(palm, 1e-5)
 
 
+def materialize_collector_scene(cup_x=None, cup_y=None):
+    from vr_left_grasp_scene import cup_grid_xy, scene_xml
+
+    default_x, default_y = cup_grid_xy(0)
+    x = default_x if cup_x is None else float(cup_x)
+    y = default_y if cup_y is None else float(cup_y)
+    if not np.isfinite([x, y]).all():
+        raise ValueError("cup_x and cup_y must be finite")
+
+    scene_dir = tempfile.TemporaryDirectory(prefix="upoo_vr_hardware_")
+    scene_path = Path(scene_dir.name) / "scene.xml"
+    scene_path.write_text(scene_xml(x, y), encoding="utf-8")
+
+    assets_source = _UPOO_SOURCE / "openarm_mujoco-master" / "v2" / "assets"
+    if not assets_source.is_dir():
+        scene_dir.cleanup()
+        raise FileNotFoundError(f"Collector model assets not found: {assets_source}")
+    os.symlink(assets_source, Path(scene_dir.name) / "assets", target_is_directory=True)
+    return scene_dir, scene_path.resolve(), x, y
+
+
 # ═══════════════════════════════════════════════════════════════
 # VR 预处理
 # ═══════════════════════════════════════════════════════════════
@@ -152,14 +190,22 @@ def normalized_pinch_metric(landmarks, thumb_tip_index=4, index_tip_index=9):
 class AbsoluteVuerPreprocessor:
     def __init__(self):
         self.vuer_head_mat = np.eye(4, dtype=np.float32)
-        self.vuer_right_wrist_mat = np.eye(4, dtype=np.float32)
+        self.vuer_left_wrist_mat = np.eye(4, dtype=np.float32)
 
     def process(self, tv):
-        self.vuer_head_mat = mat_update(self.vuer_head_mat, tv.head_matrix.copy())
-        self.vuer_right_wrist_mat = mat_update(self.vuer_right_wrist_mat, tv.right_hand.copy())
-        t_vuer_head  = grd_yup2grd_zup @ self.vuer_head_mat @ fast_mat_inv(grd_yup2grd_zup)
-        t_vuer_right = grd_yup2grd_zup @ self.vuer_right_wrist_mat @ fast_mat_inv(grd_yup2grd_zup)
-        return (t_vuer_head.astype(np.float32), t_vuer_right.astype(np.float32))
+        self.vuer_head_mat = mat_update(
+            self.vuer_head_mat, tv.head_matrix.copy())
+        self.vuer_left_wrist_mat = mat_update(
+            self.vuer_left_wrist_mat, tv.left_hand.copy())
+        t_vuer_head = (
+            grd_yup2grd_zup @ self.vuer_head_mat
+            @ fast_mat_inv(grd_yup2grd_zup)
+        )
+        t_vuer_left = (
+            grd_yup2grd_zup @ self.vuer_left_wrist_mat
+            @ fast_mat_inv(grd_yup2grd_zup)
+        )
+        return t_vuer_head.astype(np.float32), t_vuer_left.astype(np.float32)
 
 
 class VuerTeleop:
@@ -178,10 +224,10 @@ class VuerTeleop:
         self.processor = AbsoluteVuerPreprocessor()
 
     def step(self):
-        t_vuer_head, t_vuer_right = tuple(
-            x.copy() for x in self.processor.process(self.tv))
-        right_landmarks = safe_get_landmarks(self.tv, "right")
-        return t_vuer_head, t_vuer_right, right_landmarks
+        t_vuer_head, t_vuer_left = tuple(
+            value.copy() for value in self.processor.process(self.tv))
+        left_landmarks = safe_get_landmarks(self.tv, "left")
+        return t_vuer_head, t_vuer_left, left_landmarks
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -255,10 +301,17 @@ class UPOOArmSimV2:
       - Pre-built _jnt_qposadr2id map for joint limit clipping
     """
 
-    ARM_JOINT_NAMES = ["Base_J01", "J02", "J03", "J04", "J05", "J06"]
-    FINGER_JOINT_NAMES = ["upoo_finger_left", "upoo_finger_right"]
-    EE_BODY_NAME = "Link_06"
-    BODY_LINK_NAME = "base_link"
+    ARM_JOINT_NAMES = [
+        "upoo_left_J01", "upoo_left_J02", "upoo_left_J03",
+        "upoo_left_J04", "upoo_left_J05", "upoo_left_J06",
+    ]
+    FINGER_JOINT_NAMES = [
+        "upoo_left_openarm_v1_finger_joint1",
+        "upoo_left_openarm_v1_finger_joint2",
+    ]
+    EE_SITE_NAME = "upoo_left_tcp"
+    BODY_LINK_NAME = "upoo_left_base_link"
+    GRIPPER_ACTUATOR_NAME = "upoo_left_gripper_ctrl"
 
     def __init__(
         self,
@@ -268,9 +321,11 @@ class UPOOArmSimV2:
         robot_base_xyz=(0.0, 0.0, 0.0),
         base_roll_deg=0.0, base_pitch_deg=0.0, base_yaw_deg=0.0,
         calibration_delay_sec=5.0,
+        cup_x=None,
+        cup_y=None,
         enable_gripper=True,
-        gripper_open_value=5.0,
-        gripper_close_value=0.0,
+        gripper_open_value=0.044,
+        gripper_close_value=0.005,
         gripper_close_threshold=0.25,
         gripper_open_threshold=0.75,
         gripper_smoothing=0.35,
@@ -326,13 +381,17 @@ class UPOOArmSimV2:
         self.t_vuer_inithead = None
         self.t_robotbase_inithead = None
         self.t_world_inithead = None
-        self.t_robotbase_right_hand_ref = None
-        self.t_robotbase_right_eef_ref  = None
+        self.t_robotbase_left_hand_ref = None
+        self.t_robotbase_left_eef_ref  = None
 
-        # ── 加载 MuJoCo 模型 ──
-        xml_path = openarm_mujoco.openarm_upoo_xml()
-        print(f"[mujoco] 加载模型: {xml_path}")
-        self.model = mujoco.MjModel.from_xml_path(xml_path)
+        # Use the exact scene generator used by vr_collect_act_grasp_data.py.
+        (self._scene_tempdir, xml_path,
+         self.cup_x, self.cup_y) = materialize_collector_scene(cup_x, cup_y)
+        print(
+            f"[mujoco] Collector scene: {xml_path} "
+            f"cup=({self.cup_x:+.3f}, {self.cup_y:+.3f})"
+        )
+        self.model = mujoco.MjModel.from_xml_path(str(xml_path))
         self.data  = mujoco.MjData(self.model)
         self.scene = mujoco.MjvScene(self.model, maxgeom=10000)
 
@@ -363,8 +422,9 @@ class UPOOArmSimV2:
         except Exception:
             pass
 
-        # EE body
-        self.ee_body = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, self.EE_BODY_NAME)
+        # The collector controls the left-arm TCP site.
+        self.ee_site = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_SITE, self.EE_SITE_NAME)
 
         # Arm joint qpos/dof indices
         self.arm_qpos_indices = np.array([
@@ -379,20 +439,26 @@ class UPOOArmSimV2:
         # Base link (camera reference)
         self.body_link_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, self.BODY_LINK_NAME)
 
-        # Finger joints
-        self.finger_left_qpos  = self.model.jnt_qposadr[mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_JOINT, "upoo_finger_left")]
-        self.finger_right_qpos = self.model.jnt_qposadr[mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_JOINT, "upoo_finger_right")]
-
-        # Finger actuators — for ctrl-based gripper control
+        # Left gripper joints and actuator use the collector model names.
+        finger_joint_ids = [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            for name in self.FINGER_JOINT_NAMES
+        ]
+        self.finger_left_qpos = self.model.jnt_qposadr[finger_joint_ids[0]]
+        self.finger_right_qpos = self.model.jnt_qposadr[finger_joint_ids[1]]
         self.finger_act = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "finger_left_ctrl")
-        # Build set of finger actuator indices to skip in _apply_arm_ctrl
-        self._finger_act_set = {
-            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, n)
-            for n in ["finger_left_ctrl", "finger_right_ctrl"]
-        }
+            self.model, mujoco.mjtObj.mjOBJ_ACTUATOR,
+            self.GRIPPER_ACTUATOR_NAME)
+        self._finger_act_set = {self.finger_act}
+
+        required_ids = [
+            self.ee_site, self.body_link_id, self.finger_act, *finger_joint_ids,
+        ]
+        if min(required_ids) < 0:
+            raise RuntimeError(
+                "Collector scene is missing a required left-arm TCP, base, "
+                "joint, or gripper actuator"
+            )
 
         print(f"[init] nq={self.model.nq}, nu={self.model.nu}")
         print(f"[init] arm qpos indices: {self.arm_qpos_indices}")
@@ -443,6 +509,51 @@ class UPOOArmSimV2:
             jid = self.model.actuator_trnid[i, 0]
             if jid >= 0:
                 self.data.ctrl[i] = self.data.qpos[self.model.jnt_qposadr[jid]]
+
+    def sync_arm_from_hardware(self, arm_positions):
+        """Seed the MuJoCo arm from fresh physical joint feedback."""
+        arm_positions = np.asarray(arm_positions, dtype=np.float64).ravel()
+        if arm_positions.shape != (len(self.arm_qpos_indices),):
+            raise ValueError(
+                f"Expected {len(self.arm_qpos_indices)} arm positions, "
+                f"got {arm_positions.shape}"
+            )
+        if not np.isfinite(arm_positions).all():
+            raise ValueError("Hardware arm positions contain non-finite values")
+
+        for index, (qpos_adr, position) in enumerate(
+                zip(self.arm_qpos_indices, arm_positions)):
+            jid = self._jnt_qposadr2id.get(qpos_adr, -1)
+            model_position = float(position)
+            if jid >= 0:
+                lo, hi = self.model.jnt_range[jid]
+                if lo < hi and not lo <= position <= hi:
+                    joint_name = mujoco.mj_id2name(
+                        self.model, mujoco.mjtObj.mjOBJ_JOINT, jid)
+                    boundary_error = max(lo - position, position - hi)
+                    if boundary_error > umc.ZERO_VERIFY_TOLERANCE_RAD:
+                        raise RuntimeError(
+                            f"Hardware {joint_name}={position:+.4f} is outside "
+                            f"MuJoCo range [{lo:+.4f}, {hi:+.4f}] by more than "
+                            f"the {umc.ZERO_VERIFY_TOLERANCE_RAD:.4f} rad "
+                            "zero tolerance"
+                        )
+                    model_position = float(np.clip(position, lo, hi))
+                    hardware_name = umc.ARM_MOTOR_CONFIG[index][0]
+                    print(
+                        f"[mujoco] {hardware_name} feedback {position:+.4f} is "
+                        f"within zero tolerance; seeding model at boundary "
+                        f"{model_position:+.4f}"
+                    )
+            self.data.qpos[qpos_adr] = model_position
+
+        self.data.qvel[self.arm_dof_indices] = 0.0
+        self._sync_ctrl_from_qpos()
+        mujoco.mj_forward(self.model, self.data)
+        self.calibration_ready = False
+        self.calibration_requested = False
+        self.calibration_capture_time = None
+        self.last_countdown_print = None
 
     def _apply_arm_ctrl(self, q_target):
         """Servo mode: set arm actuator ctrl targets from q_target.
@@ -532,15 +643,14 @@ class UPOOArmSimV2:
         set_camera_free_pose(self._cam_left,  left_eye,  lookat)
         set_camera_free_pose(self._cam_right, right_eye, lookat)
 
-    def _get_body_pose_world(self, body_id):
-        pos  = self.data.xpos[body_id].copy()
-        quat = self.data.xquat[body_id].copy()
-        quat_xyzw = np.array([quat[1], quat[2], quat[3], quat[0]], dtype=np.float32)
-        return make_transform(pos, quat_xyzw_to_matrix(quat_xyzw))
+    def _get_site_pose_world(self, site_id):
+        pos = self.data.site_xpos[site_id].copy()
+        rotation = self.data.site_xmat[site_id].reshape(3, 3).copy()
+        return make_transform(pos, rotation)
 
     # ── 标定 ──────────────────────────────────────────────────
 
-    def _capture_calibration(self, t_vuer_inithead, t_vuer_righthand_ref):
+    def _capture_calibration(self, t_vuer_inithead, t_vuer_lefthand_ref):
         mujoco.mj_forward(self.model, self.data)
         lookat = self.static_cam_lookat
         dist = self.static_cam_distance
@@ -561,8 +671,12 @@ class UPOOArmSimV2:
         self.t_vuer_inithead = t_vuer_inithead.copy()
         self.t_world_vuer = (self.t_world_inithead @ np.linalg.inv(self.t_vuer_inithead)).astype(np.float32)
         self.t_robotbase_vuer = (self.t_robotbase_world @ self.t_world_vuer).astype(np.float32)
-        self.t_robotbase_right_hand_ref = (self.t_robotbase_vuer @ t_vuer_righthand_ref).astype(np.float32)
-        self.t_robotbase_right_eef_ref  = (self.t_robotbase_world @ self._get_body_pose_world(self.ee_body)).astype(np.float32)
+        self.t_robotbase_left_hand_ref = (
+            self.t_robotbase_vuer @ t_vuer_lefthand_ref
+        ).astype(np.float32)
+        self.t_robotbase_left_eef_ref = (
+            self.t_robotbase_world @ self._get_site_pose_world(self.ee_site)
+        ).astype(np.float32)
         self.calibration_ready = True
         print("[teleop] Calibration captured. Teleoperation active.")
 
@@ -578,7 +692,7 @@ class UPOOArmSimV2:
             self.data.qpos[self._cup_qpos_adr:self._cup_qpos_adr+7] = self._cup_init_qpos.copy()
             print("[teleop] Cup reset")
 
-    def _maybe_capture_calibration(self, t_vuer_head, t_vuer_right):
+    def _maybe_capture_calibration(self, t_vuer_head, t_vuer_left):
         if self.calibration_ready or not self.calibration_requested:
             return
         remaining = self.calibration_capture_time - time.time()
@@ -588,7 +702,7 @@ class UPOOArmSimV2:
                 print(f"[teleop] Calibration in {remaining_int}...")
                 self.last_countdown_print = remaining_int
             return
-        self._capture_calibration(t_vuer_head, t_vuer_right)
+        self._capture_calibration(t_vuer_head, t_vuer_left)
         self.calibration_requested = False
         self.calibration_capture_time = None
         self.last_countdown_print = None
@@ -608,16 +722,15 @@ class UPOOArmSimV2:
     def _ik_step_arm(self, target_pos, target_quat_xyzw):
         mujoco.mj_forward(self.model, self.data)
 
-        cur_quat = self.data.xquat[self.ee_body]
-        cur_quat_xyzw = np.array([cur_quat[1], cur_quat[2], cur_quat[3], cur_quat[0]],
-                                  dtype=np.float32)
-        pos_err = target_pos - self.data.xpos[self.ee_body]
-        ori_err = quat_error(cur_quat_xyzw, target_quat_xyzw)
+        current_rotation = self.data.site_xmat[self.ee_site].reshape(3, 3)
+        current_quat_xyzw = quat_xyzw_from_matrix(current_rotation)
+        pos_err = target_pos - self.data.site_xpos[self.ee_site]
+        ori_err = quat_error(current_quat_xyzw, target_quat_xyzw)
 
         nv = self.model.nv
         jacp = np.zeros((3, nv))
         jacr = np.zeros((3, nv))
-        mujoco.mj_jacBody(self.model, self.data, jacp, jacr, self.ee_body)
+        mujoco.mj_jacSite(self.model, self.data, jacp, jacr, self.ee_site)
 
         if self.orientation_weight > 0.0:
             J = np.vstack([jacp[:, self.arm_dof_indices], jacr[:, self.arm_dof_indices]])
@@ -668,23 +781,29 @@ class UPOOArmSimV2:
         q_final = self.data.qpos[self.arm_qpos_indices]
         return float(np.linalg.norm(q_final - q_initial))
 
-    def compute_ik(self, t_vuer_head, t_vuer_right):
+    def compute_ik(self, t_vuer_head, t_vuer_left):
         if self.print_freq:
             tic = time.time()
 
-        self._maybe_capture_calibration(t_vuer_head, t_vuer_right)
+        self._maybe_capture_calibration(t_vuer_head, t_vuer_left)
 
         if not self.calibration_ready:
             return None, 0.0
 
-        t_robotbase_right_current = (self.t_robotbase_vuer @ t_vuer_right).astype(np.float32)
+        t_robotbase_left_current = (
+            self.t_robotbase_vuer @ t_vuer_left
+        ).astype(np.float32)
 
-        t_robotbase_right_target = self._target_pose_from_hand(
-            t_robotbase_right_current, self.t_robotbase_right_hand_ref, self.t_robotbase_right_eef_ref)
+        t_robotbase_left_target = self._target_pose_from_hand(
+            t_robotbase_left_current,
+            self.t_robotbase_left_hand_ref,
+            self.t_robotbase_left_eef_ref,
+        )
+        t_world_left_target = (
+            self.t_world_robotbase @ t_robotbase_left_target
+        ).astype(np.float32)
 
-        t_world_right_target = (self.t_world_robotbase @ t_robotbase_right_target).astype(np.float32)
-
-        dq_norm = self._ik_solve_arm(t_world_right_target)
+        dq_norm = self._ik_solve_arm(t_world_left_target)
 
         if self.print_freq:
             dt = time.time() - tic
@@ -780,6 +899,9 @@ class UPOOArmSimV2:
         if self._gl_context is not None:
             self._gl_context.free()
             self._gl_context = None
+        if getattr(self, "_scene_tempdir", None) is not None:
+            self._scene_tempdir.cleanup()
+            self._scene_tempdir = None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -800,6 +922,9 @@ class HardwareMotorBridge:
         motor_smoothing=0.3,
         max_step=None,
         device_sn=None,
+        enable_gripper=True,
+        calibration_record=None,
+        require_control_tests=True,
     ):
         if not _damiao_available:
             raise RuntimeError(
@@ -812,18 +937,43 @@ class HardwareMotorBridge:
         self._kd = np.array(kd if kd is not None else umc.DEFAULT_KD, dtype=np.float64)
         self._motor_smoothing = float(motor_smoothing)
         self._device_sn = device_sn or umc.USB2CANFD_SN
+        self._enable_gripper = bool(enable_gripper)
+        self._calibration_record = Path(calibration_record or umc.CALIBRATION_RECORD)
+        self._require_control_tests = bool(require_control_tests)
+        umc.validate_calibration_record(
+            self._calibration_record,
+            require_control_tests=self._require_control_tests,
+        )
+        if not self._require_control_tests:
+            print(
+                "[safety] WARNING: mapped-control evidence is not required for this run; "
+                "zero and direction checks still passed."
+            )
+        self._direction = np.asarray(
+            umc.arm_direction_vector() + [1.0], dtype=np.float64)
 
         if len(self._kp) != umc.NUM_MOTORS or len(self._kd) != umc.NUM_MOTORS:
             raise ValueError(
                 f"kp/kd must have {umc.NUM_MOTORS} elements "
                 f"(6 arm + 1 gripper), got kp={len(self._kp)} kd={len(self._kd)}"
             )
+        if not np.isfinite(self._kp).all() or not np.isfinite(self._kd).all():
+            raise ValueError("kp/kd must contain only finite values")
+        if (self._kp < 0).any() or (self._kd < 0).any():
+            raise ValueError("kp/kd must be non-negative")
+        if not 0.0 <= self._motor_smoothing <= 1.0:
+            raise ValueError("motor_smoothing must be in [0, 1]")
+        if umc.MOTOR_CTRL_FREQ <= 0:
+            raise ValueError("MOTOR_CTRL_FREQ must be positive")
 
         # Shared state (protected by _lock)
         self._lock = threading.Lock()
         self._target_q = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
         self._emergency_stop = False
         self._last_sent_q = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
+        self._last_read_q = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
+        self._last_read_dq = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
+        self._last_read_torque = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
         self._motor_err = np.zeros(umc.NUM_MOTORS, dtype=np.int32)
 
         # Thread control
@@ -832,19 +982,20 @@ class HardwareMotorBridge:
 
         # Build motor init data
         init_data = []
-        for _joint_name, can_id, mst_id in umc.ARM_MOTOR_CONFIG:
+        for joint_name, can_id, mst_id in umc.ARM_MOTOR_CONFIG:
             init_data.append(DmActData(
-                motorType=DM_Motor_Type.DM4310_48V,
+                motorType=getattr(DM_Motor_Type, umc.ARM_MOTOR_TYPES[joint_name]),
                 mode=Control_Mode.MIT_MODE,
                 can_id=can_id,
                 mst_id=mst_id,
             ))
-        init_data.append(DmActData(
-            motorType=DM_Motor_Type.DM4310_48V,
-            mode=Control_Mode.MIT_MODE,
-            can_id=umc.GRIPPER_CAN_ID,
-            mst_id=umc.GRIPPER_MST_ID,
-        ))
+        if self._enable_gripper:
+            init_data.append(DmActData(
+                motorType=getattr(DM_Motor_Type, umc.GRIPPER_MOTOR_TYPE),
+                mode=Control_Mode.MIT_MODE,
+                can_id=umc.GRIPPER_CAN_ID,
+                mst_id=umc.GRIPPER_MST_ID,
+            ))
 
         # Create Motor_Control (auto_enable=False avoids libusb threading crash)
         self._control = Motor_Control(
@@ -857,37 +1008,59 @@ class HardwareMotorBridge:
 
         # CAN ID lookup: motor index → can_id (needed for error clearing below)
         self._can_ids = [cid for _, cid, _ in umc.ARM_MOTOR_CONFIG] + [umc.GRIPPER_CAN_ID]
+        self._active_indices = list(range(umc.ARM_DOF))
+        if self._enable_gripper:
+            self._active_indices.append(umc.ARM_DOF)
 
-        # Clear motor errors, then enable
+        # Clear motor errors (motors are NOT enabled here — that happens in start())
         for _ in range(5):
-            for can_id in self._can_ids:
+            for i in self._active_indices:
+                can_id = self._can_ids[i]
                 self._control.control_cmd(can_id, 0xFB, 0)
             time.sleep(0.005)
-        self._control.enable_all()
 
         # Build soft limit arrays for fast clipping
         self._limit_lo = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
         self._limit_hi = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
         for i, (joint_name, _, _) in enumerate(umc.ARM_MOTOR_CONFIG):
             lo, hi = umc.SOFT_POSITION_LIMITS[joint_name]
+            hard_lo, hard_hi = umc.HARD_POSITION_LIMITS[joint_name]
+            if not hard_lo <= lo < hi <= hard_hi:
+                raise ValueError(
+                    f"Invalid {joint_name} soft limits [{lo}, {hi}]; "
+                    f"hard limits are [{hard_lo}, {hard_hi}]"
+                )
             self._limit_lo[i] = lo
             self._limit_hi[i] = hi
         lo, hi = umc.SOFT_POSITION_LIMITS["gripper"]
         self._limit_lo[umc.ARM_DOF] = lo
         self._limit_hi[umc.ARM_DOF] = hi
+        self._startup_limit_lo = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
+        self._startup_limit_hi = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
+        for i, (joint_name, _, _) in enumerate(umc.ARM_MOTOR_CONFIG):
+            lo, hi = umc.startup_position_limits(joint_name)
+            self._startup_limit_lo[i] = lo
+            self._startup_limit_hi[i] = hi
+        self._startup_limit_lo[umc.ARM_DOF] = self._limit_lo[umc.ARM_DOF]
+        self._startup_limit_hi[umc.ARM_DOF] = self._limit_hi[umc.ARM_DOF]
 
         # Per-motor step limit: prevents bug-induced target jumps (rad/tick at 1kHz)
         if max_step is not None:
             self._max_step = np.broadcast_to(np.asarray(max_step, dtype=np.float64),
                                              umc.NUM_MOTORS).copy()
         else:
-            self._max_step = np.array(
-                [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.10], dtype=np.float64)
+            max_speed = np.asarray(umc.MAX_COMMAND_SPEED, dtype=np.float64)
+            if max_speed.shape != (umc.NUM_MOTORS,) or (max_speed <= 0).any():
+                raise ValueError(
+                    f"MAX_COMMAND_SPEED must contain {umc.NUM_MOTORS} positive values"
+                )
+            self._max_step = max_speed / float(umc.MOTOR_CTRL_FREQ)
 
         # Track which motors are actually present on the bus
         self._motor_connected = [False] * umc.NUM_MOTORS
 
         # Safety net: disable motors on exit, even if caller forgets stop()
+        self._stopped = False
         atexit.register(self._disable_motors)
 
     # ── Public API ────────────────────────────────────────────
@@ -936,12 +1109,120 @@ class HardwareMotorBridge:
     def start(self):
         if self._thread is not None:
             return
+
+        umc.validate_calibration_record(
+            self._calibration_record,
+            require_control_tests=self._require_control_tests,
+        )
+        self._validate_motor_parameters()
+
+        # A real zero angle is valid. Readiness is based on a newly received
+        # CAN frame, not on the numeric position value.
+        positions = self._read_fresh_positions(timeout_sec=0.5)
+        for i in self._active_indices:
+            name = (umc.ARM_MOTOR_CONFIG[i][0]
+                    if i < umc.ARM_DOF else "gripper")
+            allowed_lo, allowed_hi = umc.startup_position_limits(name)
+            if not allowed_lo <= positions[i] <= allowed_hi:
+                raise RuntimeError(
+                    f"Refusing to enable: {name}={positions[i]:+.4f} is outside "
+                    f"startup limits [{allowed_lo:+.4f}, {allowed_hi:+.4f}]"
+                )
+        self._last_sent_q[:] = positions
+        self._last_read_q[:] = positions
+        with self._lock:
+            self._target_q[:] = positions
+        print(f"[motor] Pre-enable positions: "
+              f"{[round(self._target_q[i], 4) for i in self._active_indices]}")
+
+        # Start the control thread with its send gate closed, then enable the
+        # registered motors and open only their gates.
+        self._motor_connected = [False] * umc.NUM_MOTORS
         self._running.set()
         self._emergency_stop = False
         self._thread = threading.Thread(
             target=self._motor_thread, name="motor-ctrl", daemon=True)
         self._thread.start()
-        print(f"[motor] Control thread started at {int(umc.MOTOR_CTRL_FREQ)} Hz")
+        time.sleep(0.005)
+
+        self._motor_connected = [False] * umc.NUM_MOTORS
+        self._control.enable_all()
+        for i in self._active_indices:
+            self._motor_connected[i] = True
+
+        print(f"[motor] Control thread started at {int(umc.MOTOR_CTRL_FREQ)} Hz "
+              f"targets={[round(self._target_q[i], 4) for i in self._active_indices]}")
+
+    def _validate_motor_parameters(self):
+        """Refuse arming when motor mode or MIT ranges differ from config."""
+        registers = (("PMAX", DM_REG.PMAX), ("VMAX", DM_REG.VMAX),
+                     ("TMAX", DM_REG.TMAX))
+        for i in self._active_indices:
+            motor = self._control.getMotor(self._can_ids[i])
+            if motor is None:
+                raise RuntimeError(f"Motor index {i} is not registered")
+            name = (umc.ARM_MOTOR_CONFIG[i][0]
+                    if i < umc.ARM_DOF else "gripper")
+            type_name = (umc.ARM_MOTOR_TYPES[name]
+                         if i < umc.ARM_DOF else umc.GRIPPER_MOTOR_TYPE)
+            mode = self._control.read_motor_param(motor, DM_REG.CTRL_MODE, timeout=0.5)
+            if mode is None or int(mode) != int(Control_Mode_Code.MIT):
+                raise RuntimeError(
+                    f"Refusing to enable {name}: CTRL_MODE={mode!r}, expected MIT=1")
+            actual = []
+            for register_name, register in registers:
+                value = self._control.read_motor_param(motor, register, timeout=0.5)
+                if value is None:
+                    raise RuntimeError(f"No {register_name} response from {name}")
+                actual.append(float(value))
+            expected = umc.EXPECTED_MIT_LIMITS[type_name]
+            if not np.allclose(actual, expected, rtol=0.0, atol=1e-3):
+                raise RuntimeError(
+                    f"Refusing to enable {name}: MIT limits {tuple(actual)} do not "
+                    f"match {type_name} expected {expected}")
+            motor.limit_param = actual
+            print(f"[motor] {name}: {type_name}, direction="
+                  f"{int(self._direction[i]):+d}, MIT limits={tuple(actual)}")
+
+    def _read_fresh_positions(self, timeout_sec):
+        motors = {}
+        timestamps = {}
+        for i in self._active_indices:
+            motor = self._control.getMotor(self._can_ids[i])
+            if motor is None:
+                raise RuntimeError(f"Motor index {i} is not registered")
+            motors[i] = motor
+            timestamps[i] = float(motor.last_time_)
+            self._control.refresh_motor_status(motor)
+
+        pending = set(self._active_indices)
+        deadline = time.monotonic() + float(timeout_sec)
+        while pending and time.monotonic() < deadline:
+            pending = {
+                i for i in pending
+                if float(motors[i].last_time_) <= timestamps[i]
+            }
+            if pending:
+                time.sleep(0.005)
+        if pending:
+            names = [
+                umc.ARM_MOTOR_CONFIG[i][0] if i < umc.ARM_DOF else "gripper"
+                for i in sorted(pending)
+            ]
+            raise TimeoutError(f"No fresh CAN feedback from: {', '.join(names)}")
+
+        positions = self._last_sent_q.copy()
+        for i, motor in motors.items():
+            positions[i] = self._direction[i] * float(motor.Get_Position())
+            status = int(motor.Get_err())
+            if umc.is_motor_fault(status):
+                raise RuntimeError(
+                    f"Motor index {i} reports fault 0x{status:X} "
+                    f"({umc.motor_status_label(status)})"
+                )
+        if not np.isfinite(positions[self._active_indices]).all():
+            raise RuntimeError("Fresh motor feedback contains non-finite positions")
+        return positions
 
     def _disable_motors(self):
         """Send motor-disable CAN frames. Safe to call even after close()."""
@@ -953,11 +1234,15 @@ class HardwareMotorBridge:
             print(f"[motor] disable_all error: {exc}", file=sys.stderr)
 
     def stop(self):
+        if self._stopped:
+            return
         self._running.clear()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
         self._disable_motors()
+        atexit.unregister(self._disable_motors)
+        self._stopped = True
         # NOTE: _control.close() calls context.destroy() which segfaults
         # due to a libusb async I/O threading bug in libdm_device.so.
         # We skip it — the OS reclaims USB resources on process exit.
@@ -967,25 +1252,31 @@ class HardwareMotorBridge:
         q = np.asarray(q, dtype=np.float64).ravel()
         if q.shape[0] != umc.NUM_MOTORS:
             raise ValueError(f"Expected {umc.NUM_MOTORS} targets, got {q.shape[0]}")
+        if not np.isfinite(q).all():
+            raise ValueError("Motor targets must contain only finite values")
         with self._lock:
-            np.copyto(self._target_q, q)
+            if self._emergency_stop:
+                return
+            np.copyto(self._target_q, np.clip(q, self._limit_lo, self._limit_hi))
 
     def get_state(self):
+        """Return feedback in MuJoCo coordinates (q, dq, torque, faults)."""
         with self._lock:
-            return self._last_sent_q.copy(), self._motor_err.copy()
+            return (self._last_read_q.copy(), self._last_read_dq.copy(),
+                    self._last_read_torque.copy(), self._motor_err.copy())
 
     def emergency_stop(self):
         with self._lock:
             self._emergency_stop = True
-            self._target_q[:] = 0.0
-        print("[motor] EMERGENCY STOP", file=sys.stderr)
+            self._running.clear()
+            self._motor_connected = [False] * umc.NUM_MOTORS
+        print("[motor] EMERGENCY STOP: disabling motors", file=sys.stderr)
+        self._disable_motors()
 
     # ── Motor control thread ──────────────────────────────────
 
     def _motor_thread(self):
         period = 1.0 / umc.MOTOR_CTRL_FREQ
-        time.sleep(0.1)
-        self._seed_last_sent_from_motors()
         last_debug_ts = time.monotonic()
         _thread_start = time.monotonic()  # grace period reference
 
@@ -994,7 +1285,7 @@ class HardwareMotorBridge:
 
             estop, target, kp, kd = self._snapshot_targets()
             if estop:
-                target = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
+                break
 
             # Per-motor step limit: clamp target deltas to prevent wild jumps
             for i in range(umc.NUM_MOTORS):
@@ -1009,7 +1300,10 @@ class HardwareMotorBridge:
                     (1.0 - self._motor_smoothing) * self._last_sent_q[i]
                     + self._motor_smoothing * target[i]
                 )
-                clipped_q = float(np.clip(smooth_q, self._limit_lo[i], self._limit_hi[i]))
+                # Preserve a validated startup pose just outside a soft limit.
+                # Public targets are clipped to the normal soft limits in set_target().
+                clipped_q = float(np.clip(
+                    smooth_q, self._startup_limit_lo[i], self._startup_limit_hi[i]))
                 self._last_sent_q[i] = clipped_q
 
                 if not self._motor_connected[i]:
@@ -1018,22 +1312,26 @@ class HardwareMotorBridge:
                 if motor is None:
                     continue
                 try:
+                    motor_q = self._direction[i] * clipped_q
                     self._control.control_mit(
                         motor, float(kp[i]), float(kd[i]),
-                        clipped_q, 0.0, 0.0,
+                        motor_q, 0.0, 0.0,
                     )
                 except Exception as exc:
                     print(f"[motor] control_mit error motor {i}: {exc}", file=sys.stderr)
 
-            # Error flags (connected motors only)
+            # Error flags + motor state readback (connected motors only)
             for i in range(umc.NUM_MOTORS):
                 if not self._motor_connected[i]:
                     continue
                 motor = self._control.getMotor(self._can_ids[i])
                 if motor is not None:
-                    err = motor.Get_err()
-                    if err != 0:
-                        self._motor_err[i] = int(err)
+                    status = int(motor.Get_err())
+                    self._motor_err[i] = status if umc.is_motor_fault(status) else 0
+                    self._last_read_q[i] = self._direction[i] * float(motor.state_q)
+                    self._last_read_dq[i] = self._direction[i] * float(motor.state_dq)
+                    self._last_read_torque[i] = (
+                        self._direction[i] * float(getattr(motor, 'state_tau', 0.0)))
 
             # CAN timeout (skip during startup grace period, connected motors only)
             now = time.monotonic()
@@ -1043,7 +1341,7 @@ class HardwareMotorBridge:
                         continue
                     motor = self._control.getMotor(self._can_ids[i])
                     if motor is not None:
-                        dt = motor.getTimeInterval()
+                        dt = now - float(motor.last_time_)
                         if dt > umc.CAN_TIMEOUT_SEC:
                             print(f"[motor] CAN timeout motor {i} (dt={dt:.3f}s)", file=sys.stderr)
                             self.emergency_stop()
@@ -1068,21 +1366,6 @@ class HardwareMotorBridge:
                 self._kp.copy(),
                 self._kd.copy(),
             )
-
-    def _seed_last_sent_from_motors(self):
-        for i in range(umc.NUM_MOTORS):
-            motor = self._control.getMotor(self._can_ids[i])
-            if motor is not None:
-                pos = motor.Get_Position()
-                self._last_sent_q[i] = pos
-                self._target_q[i] = pos  # hold current position until IK takes over
-                # Mark as connected if CAN frames have been received recently
-                dt = motor.getTimeInterval()
-                self._motor_connected[i] = dt > 0.0 and dt < 5.0
-        connected = [f"{umc.ARM_MOTOR_CONFIG[i][0] if i < umc.ARM_DOF else 'gripper'}"
-                      for i in range(umc.NUM_MOTORS) if self._motor_connected[i]]
-        print(f"[motor] Connected: {connected if connected else '(none)'}")
-        print(f"[motor] Seeded initial positions: {self._last_sent_q}")
 
     # ── Context manager ───────────────────────────────────────
 
@@ -1114,12 +1397,27 @@ def parse_args():
                         help="MIT damping gains [j1..j6 gripper]")
     parser.add_argument("--motor-smoothing", type=float, default=umc.MOTOR_SMOOTHING)
     parser.add_argument("--motor-freq", type=float, default=None)
+    parser.add_argument(
+        "--calibration-record", type=Path, default=umc.CALIBRATION_RECORD,
+        help="Validated direction/zero/control-test record required before arming")
+    parser.add_argument(
+        "--skip-mapped-control-check",
+        action="store_true",
+        help=(
+            "Allow a commissioning run without mapped-control test records. "
+            "Zero and direction records remain mandatory."
+        ),
+    )
 
     # Teleop flags
-    parser.add_argument("--ngrok", action="store_true")
-    parser.add_argument("--local-cert", action="store_true")
-    parser.add_argument("--cert-file", type=str, default="./cert.pem")
-    parser.add_argument("--key-file", type=str, default="./key.pem")
+    parser.add_argument(
+        "--ngrok", action="store_true",
+        help="Use the legacy plain HTTP/ngrok mode instead of local TLS")
+    parser.add_argument(
+        "--local-cert", action="store_true",
+        help="Use local TLS (default; retained for compatibility)")
+    parser.add_argument("--cert-file", type=str, default=str(_DEFAULT_CERT_FILE))
+    parser.add_argument("--key-file", type=str, default=str(_DEFAULT_KEY_FILE))
     parser.add_argument("--print-freq", action="store_true")
     parser.add_argument("--orientation-weight", type=float, default=1.0)
     parser.add_argument("--position-gain", type=float, default=1.0)
@@ -1130,6 +1428,12 @@ def parse_args():
     parser.add_argument("--ik-tolerance", type=float, default=0.001)
     parser.add_argument("--joint-weights", type=float, nargs=6, default=None)
     parser.add_argument("--position-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--cup-x", type=float, default=None,
+        help="Collector-scene cup X; defaults to grid point 0")
+    parser.add_argument(
+        "--cup-y", type=float, default=None,
+        help="Collector-scene cup Y; defaults to grid point 0")
     parser.add_argument("--robot-x", type=float, default=0.0)
     parser.add_argument("--robot-y", type=float, default=0.0)
     parser.add_argument("--robot-z", type=float, default=0.0)
@@ -1138,8 +1442,8 @@ def parse_args():
     parser.add_argument("--base-yaw-deg", type=float, default=0.0)
     parser.add_argument("--calibration-delay-sec", type=float, default=5.0)
     parser.add_argument("--disable-gripper", action="store_true")
-    parser.add_argument("--gripper-open-value", type=float, default=5.0)
-    parser.add_argument("--gripper-close-value", type=float, default=0.0)
+    parser.add_argument("--gripper-open-value", type=float, default=0.044)
+    parser.add_argument("--gripper-close-value", type=float, default=0.005)
     parser.add_argument("--gripper-close-threshold", type=float, default=0.25)
     parser.add_argument("--gripper-open-threshold", type=float, default=0.75)
     parser.add_argument("--gripper-smoothing", type=float, default=0.3)
@@ -1150,9 +1454,9 @@ def parse_args():
 
 
 def create_teleop(args):
-    ngrok_mode = True if not args.local_cert else False
-    if args.ngrok:
-        ngrok_mode = True
+    # Local TLS is the safe default for Quest/WebXR. Plain HTTP/ngrok is
+    # opt-in because it does not provide a secure local VR origin.
+    ngrok_mode = bool(args.ngrok)
     return VuerTeleop(
         resolution=(480, 640), ngrok=ngrok_mode,
         cert_file=args.cert_file, key_file=args.key_file,
@@ -1173,6 +1477,8 @@ def create_sim(args):
         base_pitch_deg=args.base_pitch_deg,
         base_yaw_deg=args.base_yaw_deg,
         calibration_delay_sec=args.calibration_delay_sec,
+        cup_x=args.cup_x,
+        cup_y=args.cup_y,
         enable_gripper=not args.disable_gripper,
         gripper_open_value=args.gripper_open_value,
         gripper_close_value=args.gripper_close_value,
@@ -1193,7 +1499,23 @@ def create_sim(args):
 # ═══════════════════════════════════════════════════════════════
 
 def main():
+    # damiao installs a SIGINT handler at import time which only logs the
+    # signal. Restore normal KeyboardInterrupt handling for orderly shutdown.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     args = parse_args()
+
+    if _simulation_import_error is not None:
+        print(
+            f"[ERROR] VR/MuJoCo dependencies could not be imported from "
+            f"{_DEPLOY_DIR}: {_simulation_import_error}",
+            file=sys.stderr,
+        )
+        print(
+            "[ERROR] Set KIO_TELEOP_DEPLOY_DIR to the directory containing "
+            "the TeleVision deployment dependencies.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if args.motor_enable and not _damiao_available:
         print("[ERROR] --motor-enable requested but damiao/dmcan not found.", file=sys.stderr)
@@ -1208,29 +1530,35 @@ def main():
     sim = create_sim(args)
 
     hw_bridge = None
+    hardware_armed = False
     if args.motor_enable:
         hw_bridge = HardwareMotorBridge(
             kp=args.kp if args.kp is not None else None,
             kd=args.kd if args.kd is not None else None,
             motor_smoothing=args.motor_smoothing,
             device_sn=args.device_sn,
+            enable_gripper=not args.disable_gripper,
+            calibration_record=args.calibration_record,
+            require_control_tests=not args.skip_mapped_control_check,
         )
-        hw_bridge.start()
 
     print("\n[teleop] ======== UPOO Arm Hardware Teleop v2 (servo mode) ========")
-    print("[teleop] 6-DOF, 右手控制")
-    print(f"[teleop] 硬件电机: {'ENABLED' if hw_bridge else 'DISABLED (sim only)'}")
+    print("[teleop] 6-DOF, 左手控制（与采集程序一致）")
+    hardware_status = "READY (press A to arm)" if hw_bridge else "DISABLED (sim only)"
+    print(f"[teleop] 硬件电机: {hardware_status}")
+    if hw_bridge and args.skip_mapped_control_check:
+        print("[teleop] 警告: 本次明确跳过 mapped-control 记录检查（首次联调模式）")
     print("[teleop] 仿真模式: servo (ctrl-driven PD actuators) + real-time steps")
-    print("[teleop] P=标定  R=复位杯子  E=急停")
+    print("[teleop] A=真机上电  P=VR标定  R=复位杯子  E=急停")
     if hw_bridge:
         print(f"[teleop] kp={hw_bridge._kp}  kd={hw_bridge._kd}")
     print()
 
+    viewer = None
     try:
         # Init stereo before viewer (GLContext needs active context)
         sim._init_stereo()
 
-        viewer = None
         try:
             viewer = mujoco.viewer.launch_passive(sim.model, sim.data)
             viewer.cam.lookat[:]  = sim.model.stat.center
@@ -1248,34 +1576,55 @@ def main():
 
         # Stdin reader
         stdin_stop = threading.Event()
+        arm_requested = threading.Event()
 
         def _stdin_reader():
             while not stdin_stop.is_set():
                 r, _, _ = select.select([sys.stdin], [], [], 0.5)
                 if r:
                     line = sys.stdin.readline().strip().lower()
-                    if line == 'p':
+                    if line == 'a':
+                        arm_requested.set()
+                    elif line == 'p':
                         sim._request_calibration()
                     elif line == 'r':
                         sim._reset_cup()
                     elif line == 'e':
-                        if hw_bridge:
+                        if hw_bridge and hardware_armed:
                             hw_bridge.emergency_stop()
                         print("[stdin] Emergency stop triggered")
 
         stdin_thread = threading.Thread(target=_stdin_reader, daemon=True)
         stdin_thread.start()
 
-        print("\nMuJoCo viewer open. P=calibrate  R=reset cup  E=estop\n")
+        print("\nMuJoCo viewer open. A=arm hardware  P=calibrate  R=reset cup  E=estop\n")
 
         while viewer is None or viewer.is_running():
             tic = time.time()
 
+            if arm_requested.is_set():
+                arm_requested.clear()
+                if hw_bridge is None:
+                    print("[motor] --motor-enable was not supplied; staying in simulation mode")
+                elif hardware_armed:
+                    print("[motor] Hardware is already armed")
+                else:
+                    print("[motor] Arming hardware and reading physical joint state...")
+                    hw_bridge.start()
+                    motor_pos, _, _, motor_err = hw_bridge.get_state()
+                    if np.any(motor_err[:umc.ARM_DOF] != 0):
+                        hw_bridge.emergency_stop()
+                        raise RuntimeError(f"Motor errors after arm: {motor_err}")
+                    sim.sync_arm_from_hardware(motor_pos[:umc.ARM_DOF])
+                    q_smoothed = sim.data.qpos.copy()
+                    hardware_armed = True
+                    print("[motor] Hardware armed and simulation synchronized. Press P to calibrate VR.")
+
             # ① VR
-            t_vuer_head, t_vuer_right, right_lm = teleop.step()
+            t_vuer_head, t_vuer_left, left_lm = teleop.step()
 
             # ② IK
-            q_result, dq_norm = sim.compute_ik(t_vuer_head, t_vuer_right)
+            q_result, dq_norm = sim.compute_ik(t_vuer_head, t_vuer_left)
 
             if q_result is not None and dq_norm > umc.IK_DIVERGENCE_THRESH:
                 print(f"[ik] divergence dq={dq_norm:.3f} — skipping", file=sys.stderr)
@@ -1290,15 +1639,15 @@ def main():
 
             # ③ Gripper — always update sim.gripper_cmd for MuJoCo
             if sim.calibration_ready and sim.enable_gripper:
-                if right_lm is not None:
+                if left_lm is not None:
                     if not sim._gripper_landmarks_ready:
                         sim.gripper_cmd = float(q_smoothed[sim.finger_left_qpos])
                         sim._gripper_landmarks_ready = True
                         print("[gripper] landmarks ready")
-                    sim.gripper_cmd = sim._gripper_command_from_landmarks(right_lm)
+                    sim.gripper_cmd = sim._gripper_command_from_landmarks(left_lm)
 
             # ④ Hardware motor command
-            if hw_bridge and sim.calibration_ready:
+            if hw_bridge and hardware_armed and sim.calibration_ready:
                 arm_targets = q_smoothed[sim.arm_qpos_indices].copy()
                 full_target = np.append(arm_targets, sim.gripper_cmd)
                 hw_bridge.set_target(full_target)
@@ -1328,7 +1677,7 @@ def main():
             frame_count += 1
 
             # ⑦ Periodic diagnostic
-            if now - last_debug_ts >= 2.0:
+            if args.print_freq and now - last_debug_ts >= 2.0:
                 js = {}
                 for name in sim.ARM_JOINT_NAMES:
                     try:
@@ -1336,13 +1685,13 @@ def main():
                         js[name] = float(q_smoothed[sim.model.jnt_qposadr[jid]])
                     except Exception:
                         js[name] = 0.0
-                rh = t_vuer_right
-                print(f"[DIAG] RH=({rh[0,3]:.2f},{rh[1,3]:.2f},{rh[2,3]:.2f}) "
+                lh = t_vuer_left
+                print(f"[DIAG] LH=({lh[0,3]:.2f},{lh[1,3]:.2f},{lh[2,3]:.2f}) "
                       f"dq={dq_norm:.3f} "
                       + " ".join(f"j{i}={js.get(n,0):.3f}"
                                  for i, n in enumerate(sim.ARM_JOINT_NAMES, 1)))
                 if hw_bridge:
-                    pos, errs = hw_bridge.get_state()
+                    pos, vel, torque, errs = hw_bridge.get_state()
                     motor_str = " ".join(f"{pos[i]:.3f}" for i in range(umc.ARM_DOF))
                     print(f"[DIAG] motor=[{motor_str}] "
                           f"grip={pos[umc.ARM_DOF]:.4f} err={errs}")
@@ -1365,6 +1714,11 @@ def main():
         if hw_bridge:
             print("[main] Stopping motors...")
             hw_bridge.stop()
+        if viewer is not None:
+            try:
+                viewer.close()
+            except Exception:
+                pass
         if sim is not None:
             sim.close()
         if teleop is not None:

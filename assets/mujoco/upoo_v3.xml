@@ -1,0 +1,126 @@
+<mujoco model="UPOOSTUDIO_1.5KG">
+  <compiler angle="radian" autolimits="true"
+             meshdir="../meshes"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast"/>
+
+  <default>
+    <joint limited="true" damping="3.0" armature="0.01"/>
+    <geom contype="1" conaffinity="1" condim="6"
+          solref="0.02 1" solimp="0.9 0.95 0.001"
+          friction="1.5 0.3 0.05"/>
+    <default class="visual">
+      <geom contype="0" conaffinity="0" group="2"/>
+    </default>
+    <default class="collision">
+      <geom group="3"/>
+    </default>
+    <default class="gripper">
+      <geom condim="6" solref="0.02 1" friction="2.0 0.5 0.05"/>
+    </default>
+  </default>
+
+  <asset>
+    <texture name="grid_tex" type="2d" builtin="checker" width="256" height="256"
+             rgb1="0.15 0.18 0.25" rgb2="0.2 0.25 0.35"/>
+    <material name="grid_mat" texture="grid_tex" texrepeat="6 6" reflectance="0.05"/>
+    <mesh name="mesh_base_link" file="base_link.STL"/>
+    <mesh name="mesh_Link_01" file="Link_01.STL"/>
+    <mesh name="mesh_Link_02" file="Link_02.STL"/>
+    <mesh name="mesh_Link_03" file="Link_03.STL"/>
+    <mesh name="mesh_Link_04" file="Link_04.STL"/>
+    <mesh name="mesh_Link_05" file="Link_05.STL"/>
+    <mesh name="mesh_Link_06" file="Link_06.STL"/>
+  </asset>
+
+  <worldbody>
+    <light name="sun" directional="true" diffuse="0.7 0.7 0.7" specular="0.3 0.3 0.3"
+           pos="2 1 3" dir="-1 -0.3 -1"/>
+
+    <geom name="floor" type="plane" size="0 0 0.05" pos="0 0 0"
+          material="grid_mat"/>
+
+    <!-- Table + cup -->
+    <body name="table" pos="0.35 0.2 0">
+      <geom name="table_top" type="box" size="0.2 0.15 0.015" rgba="0.55 0.35 0.15 1" class="collision"/>
+    </body>
+    <body name="cup" pos="0.35 0.2 0.035">
+      <freejoint/>
+      <geom name="cup_body" type="cylinder" size="0.035 0.045" mass="0.25" rgba="1 0.15 0.15 1" class="collision"/>
+    </body>
+    <!-- Base link (static, fixed to world) -->
+    <body name="base_link" pos="0 0 0.02">
+      <geom name="base_link_vis" type="mesh" mesh="mesh_base_link" rgba="0.5 0.5 0.6 1" class="visual"/>
+      <geom name="base_link_col" type="cylinder" size="0.07 0.015" pos="0 0 -0.005" class="collision"/>
+      <body name="Link_01" pos="0 0 0">
+        <joint name="Base _J01" type="hinge" axis="0 0 -1" range="-2.82 2.82"/>
+        <inertial pos="4.2174462242905E-09 -0.00124404976816361 0.0230550386350709" mass="0.350707875933926"
+                  fullinertia="0.000285887501504946 0.00049547075448618 0.00043828076124294 -8.6518040332638e-12 1.23917923863354e-11 -3.67341248547145e-08"/>
+        <geom name="Link_01_vis" type="mesh" mesh="mesh_Link_01" rgba="0.5 0.5 0.6 1" class="visual"/>
+        <geom name="Link_01_col" type="cylinder" size="0.05 0.02" class="collision"/>
+        <body name="Link_02" pos="0 0 0.04176">
+          <joint name="J02" type="hinge" axis="1 0 0" range="-3.14 0.0"/>
+          <inertial pos="-0.00103462201382662 -0.0109555943636958 0.00774514707587276" mass="0.671672918277462"
+                    fullinertia="0.000319526435119736 0.000369914008934196 0.000408711270920345 5.80848836326841e-07 -3.11240654656752e-07 -2.9894610957103e-06"/>
+          <geom name="Link_02_vis" type="mesh" mesh="mesh_Link_02" rgba="0.5 0.5 0.6 1" class="visual"/>
+          <geom name="Link_02_col" type="cylinder" size="0.05 0.02" class="collision"/>
+          <body name="Link_03" pos="0 -0.0602500000000012 0.00774017811225591">
+            <joint name="J03" type="hinge" axis="0 1 0" range="-1.57 1.57"/>
+            <inertial pos="-0.00315895678249157 -0.106389300507964 0.00144826569905046" mass="0.759858794947217"
+                      fullinertia="0.00100247842457942 0.000417465728171374 0.000893492208680512 -5.63486072995805e-05 5.76324624226224e-07 7.34756237322534e-06"/>
+            <geom name="Link_03_vis" type="mesh" mesh="mesh_Link_03" rgba="0.5 0.5 0.6 1" class="visual"/>
+            <geom name="Link_03_col" type="cylinder" size="0.05 0.02" class="collision"/>
+            <body name="Link_04" pos="0 -0.1535 0">
+              <joint name="J04" type="hinge" axis="0 0 1" range="-0.78 2.6"/>
+              <inertial pos="-0.00223565864264426 -0.0572282137342686 0.000925691786811567" mass="0.549723593796039"
+                        fullinertia="0.000427799242918439 0.000210127404375671 0.000415998228489893 -1.64055662013839e-06 -5.15248062685778e-06 -2.35749317367427e-06"/>
+              <geom name="Link_04_vis" type="mesh" mesh="mesh_Link_04" rgba="0.5 0.5 0.6 1" class="visual"/>
+              <geom name="Link_04_col" type="cylinder" size="0.05 0.02" class="collision"/>
+              <body name="Link_05" pos="0 -0.0955000000000005 0">
+                <joint name="J05" type="hinge" axis="0 -1 0" range="-1.57 1.57"/>
+                <inertial pos="4.09809370484208E-05 -0.0408892406153549 4.19968123942793E-05" mass="0.476031589866558"
+                          fullinertia="0.00022535643752685 0.000162962828146822 0.000175806107144355 6.32758794212867e-07 7.21527286035776e-08 -9.86184908876216e-07"/>
+                <geom name="Link_05_vis" type="mesh" mesh="mesh_Link_05" rgba="0.5 0.5 0.6 1" class="visual"/>
+                <geom name="Link_05_col" type="cylinder" size="0.05 0.02" class="collision"/>
+                <body name="Link_06" pos="0 -0.045500000000001 0">
+                  <joint name="J06" type="hinge" axis="1 0 0" range="-1.57 1.57"/>
+                  <inertial pos="-0.000198476404232499 -0.0714020393027362 5.1721044300318E-05" mass="0.773066581164664"
+                            fullinertia="0.000355393592677326 0.000528217462667785 0.000620542630219826 5.19342207090488e-07 1.73311457392444e-07 -7.76893779256658e-07"/>
+                  <geom name="Link_06_vis" type="mesh" mesh="mesh_Link_06" rgba="0.5 0.5 0.6 1" class="visual"/>
+                  <geom name="Link_06_col" type="cylinder" size="0.05 0.02" class="collision"/>
+                  <body name="gripper_mount" pos="0 -0.025 0">
+                    <geom name="gripper_mount_col" type="box" size="0.015 0.015 0.02" class="gripper" mass="0.1"/>
+                    <body name="finger_left" pos="0 0.005 0.018">
+                      <joint name="upoo_finger_left" type="slide" axis="0 0 -1" range="0 0.025"/>
+                      <geom name="finger_left_col" type="box" size="0.004 0.02 0.012" class="gripper"/>
+                    </body>
+                    <body name="finger_right" pos="0 0.005 -0.018">
+                      <joint name="upoo_finger_right" type="slide" axis="0 0 1" range="0 0.025"/>
+                      <geom name="finger_right_col" type="box" size="0.004 0.02 0.012" class="gripper"/>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <position name="Base _J01_act" joint="Base _J01" kp="200" kv="30" ctrllimited="true" ctrlrange="-2.82 2.82"/>
+    <position name="J02_act" joint="J02" kp="300" kv="30" ctrllimited="true" ctrlrange="-3.14 0.0"/>
+    <position name="J03_act" joint="J03" kp="150" kv="30" ctrllimited="true" ctrlrange="-1.57 1.57"/>
+    <position name="J04_act" joint="J04" kp="100" kv="30" ctrllimited="true" ctrlrange="-0.78 2.6"/>
+    <position name="J05_act" joint="J05" kp="100" kv="30" ctrllimited="true" ctrlrange="-1.57 1.57"/>
+    <position name="J06_act" joint="J06" kp="80" kv="30" ctrllimited="true" ctrlrange="-1.57 1.57"/>
+    <position name="finger_left_ctrl"  joint="upoo_finger_left"  kp="100" kv="10" ctrllimited="true" ctrlrange="0 0.025" forcerange="-15 15"/>
+    <position name="finger_right_ctrl" joint="upoo_finger_right" kp="100" kv="10" ctrllimited="true" ctrlrange="0 0.025" forcerange="-15 15"/>
+  </actuator>
+
+  <keyframe>
+    <key name="home"
+         qpos="0.35 0.2 0.035 1 0 0 0  0 -1.0 -0.6 0.5 -0.3 0  0.025 0.025"/>
+  </keyframe>
+</mujoco>

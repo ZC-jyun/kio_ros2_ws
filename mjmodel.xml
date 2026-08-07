@@ -1,0 +1,300 @@
+<mujoco model="MuJoCo Model">
+  <compiler angle="radian" meshdir="/home/kiorobot/kio_robot_zzc/kio_upoo-main/openarm_mujoco-master/v2/"/>
+
+  <option timestep="0.001" integrator="implicitfast" cone="elliptic" iterations="150"/>
+
+  <visual>
+    <headlight ambient="0.3 0.3 0.3" diffuse="0.6 0.6 0.6"/>
+  </visual>
+
+  <default>
+    <joint limited="true" armature="0.01" damping="1.2" frictionloss="0.03"/>
+    <default class="cup_col">
+      <geom size="0.02 0.02 0.02" type="box" friction="0.8 0.1 0.1" solref="0.005"/>
+    </default>
+    <default class="upoo_visual">
+      <geom type="mesh" contype="0" conaffinity="0" group="2"/>
+    </default>
+    <default class="hybrid_visual">
+      <geom type="mesh" contype="0" conaffinity="0" group="2"/>
+    </default>
+    <default class="hybrid_collision">
+      <geom type="mesh" condim="4" group="3" priority="1" friction="1.2 0.02 0.002" solref="0.005" solimp="0.95 0.99"/>
+    </default>
+    <default class="upoo_arm_collision">
+      <geom type="mesh" condim="4" group="3" priority="1" friction="1 0.02 0.002" solref="0.004" solimp="0.95 0.99" rgba="1 0.35 0.1 0.25"/>
+    </default>
+  </default>
+
+  <asset>
+    <texture type="2d" colorspace="auto" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texrepeat="5 5" reflectance="0.2"/>
+    <material name="table_mat" reflectance="0.1" rgba="0.6 0.4 0.2 1"/>
+    <material name="red" rgba="1 0.2 0.2 1"/>
+    <material name="hybrid_default_material" rgba="0.7 0.7 0.7 1"/>
+    <material name="hybrid_matte_black" reflectance="0.05" rgba="0.247059 0.247059 0.247059 1"/>
+    <material name="hybrid_metal_silver" shininess="1" reflectance="0.6" rgba="0.796078 0.796078 0.796078 1"/>
+    <material name="hybrid_collision_material" shininess="0" rgba="1 0.28 0.1 0.35"/>
+    <mesh name="upoo_right_base_link_mesh" content_type="model/stl" file="../../upoo_robot/meshes/base_link.STL"/>
+    <mesh name="upoo_right_Link_01_mesh" content_type="model/stl" file="../../upoo_robot/meshes/Link_01.STL"/>
+    <mesh name="upoo_right_Link_02_mesh" content_type="model/stl" file="../../upoo_robot/meshes/Link_02.STL"/>
+    <mesh name="upoo_right_Link_03_mesh" content_type="model/stl" file="../../upoo_robot/meshes/Link_03.STL"/>
+    <mesh name="upoo_right_Link_04_mesh" content_type="model/stl" file="../../upoo_robot/meshes/Link_04.STL"/>
+    <mesh name="upoo_right_Link_05_mesh" content_type="model/stl" file="../../upoo_robot/meshes/Link_05.STL"/>
+    <mesh name="upoo_left_base_link_mesh" content_type="model/stl" file="../../upoo_robot/meshes/base_link.STL" scale="-1 1 1"/>
+    <mesh name="upoo_left_Link_01_mesh" content_type="model/stl" file="../../upoo_robot/meshes/Link_01.STL" scale="-1 1 1"/>
+    <mesh name="upoo_left_Link_02_mesh" content_type="model/stl" file="../../upoo_robot/meshes/Link_02.STL" scale="-1 1 1"/>
+    <mesh name="upoo_left_Link_03_mesh" content_type="model/stl" file="../../upoo_robot/meshes/Link_03.STL" scale="-1 1 1"/>
+    <mesh name="upoo_left_Link_04_mesh" content_type="model/stl" file="../../upoo_robot/meshes/Link_04.STL" scale="-1 1 1"/>
+    <mesh name="upoo_left_Link_05_mesh" content_type="model/stl" file="../../upoo_robot/meshes/Link_05.STL" scale="-1 1 1"/>
+    <mesh name="hybrid_right_finger_0_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/gripper/finger_0.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="hybrid_left_finger_0_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/gripper/finger_0.obj" scale="-0.001 0.001 0.001"/>
+    <mesh name="hybrid_right_finger_0_flip_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/gripper/finger_0.obj" scale="0.001 -0.001 0.001"/>
+    <mesh name="hybrid_left_finger_0_flip_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/gripper/finger_0.obj" scale="-0.001 -0.001 0.001"/>
+    <mesh name="hybrid_right_finger_1_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/gripper/finger_1.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="hybrid_left_finger_1_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/gripper/finger_1.obj" scale="-0.001 0.001 0.001"/>
+    <mesh name="hybrid_right_finger_1_flip_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/gripper/finger_1.obj" scale="0.001 -0.001 0.001"/>
+    <mesh name="hybrid_left_finger_1_flip_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/gripper/finger_1.obj" scale="-0.001 -0.001 0.001"/>
+    <mesh name="hybrid_right_finger_collision" content_type="model/stl" file="assets/openarm_v1_eef/collision/gripper/finger.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hybrid_left_finger_collision" content_type="model/stl" file="assets/openarm_v1_eef/collision/gripper/finger.stl" scale="-0.001 0.001 0.001"/>
+    <mesh name="hybrid_right_finger_collision_left" content_type="model/stl" file="assets/openarm_v1_eef/collision/gripper/finger.stl" scale="0.001 -0.001 0.001"/>
+    <mesh name="hybrid_left_finger_collision_left" content_type="model/stl" file="assets/openarm_v1_eef/collision/gripper/finger.stl" scale="-0.001 -0.001 0.001"/>
+    <mesh name="hybrid_right_hand_0_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/gripper/hand_0.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="hybrid_left_hand_0_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/gripper/hand_0.obj" scale="-0.001 0.001 0.001"/>
+    <mesh name="hybrid_right_hand_1_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/gripper/hand_1.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="hybrid_left_hand_1_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/gripper/hand_1.obj" scale="-0.001 0.001 0.001"/>
+    <mesh name="hybrid_right_hand_collision" content_type="model/stl" file="assets/openarm_v1_eef/collision/gripper/hand.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hybrid_left_hand_collision" content_type="model/stl" file="assets/openarm_v1_eef/collision/gripper/hand.stl" scale="-0.001 0.001 0.001"/>
+    <mesh name="hybrid_right_link7_0_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/arm/link7_0.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="hybrid_left_link7_0_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/arm/link7_0.obj" scale="-0.001 0.001 0.001"/>
+    <mesh name="hybrid_right_link7_1_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/arm/link7_1.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="hybrid_left_link7_1_obj" content_type="model/obj" file="assets/openarm_v1_eef/visual/arm/link7_1.obj" scale="-0.001 0.001 0.001"/>
+    <mesh name="hybrid_right_link7_collision" content_type="model/stl" file="assets/openarm_v1_eef/collision/arm/link7.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hybrid_left_link7_collision" content_type="model/stl" file="assets/openarm_v1_eef/collision/arm/link7.stl" scale="-0.001 0.001 0.001"/>
+  </asset>
+
+  <worldbody>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+    <camera name="vr_center" pos="0.12 0 1.08" quat="0.664872 0.240717 0.240717 0.664872" resolution="640 480"/>
+    <light pos="2 2 2" dir="-0.57735 -0.57735 -0.57735"/>
+    <body name="upoo_right_base_link" pos="0 0.12455 0.7" quat="0 0 0.707107 0.707107">
+      <inertial pos="-1.98663e-05 -8.4251e-06 -0.0412576" quat="0.000691638 0.706763 0.000104617 0.70745" mass="1.18318" diaginertia="0.00169433 0.00106197 0.00104151"/>
+      <geom name="upoo_right_base_link_visual" class="upoo_visual" rgba="0.752941 0.752941 0.752941 1" mesh="upoo_right_base_link_mesh"/>
+      <geom name="upoo_right_base_link_collision" class="upoo_arm_collision" material="hybrid_collision_material" mesh="upoo_right_base_link_mesh"/>
+      <body name="upoo_right_Link_01">
+        <inertial pos="4.21745e-09 -0.00124405 0.023055" quat="0.500161 0.499839 0.500161 0.499839" mass="0.350708" diaginertia="0.000495471 0.000438281 0.000285888"/>
+        <joint name="upoo_right_J01" pos="0 0 0" axis="0 0 -1" range="-2.82 2.82"/>
+        <geom name="upoo_right_Link_01_visual" class="upoo_visual" rgba="0.752941 0.752941 0.752941 1" mesh="upoo_right_Link_01_mesh"/>
+        <geom name="upoo_right_Link_01_collision" class="upoo_arm_collision" material="hybrid_collision_material" mesh="upoo_right_Link_01_mesh"/>
+        <body name="upoo_right_Link_02" pos="0 0 0.04176">
+          <inertial pos="-0.00103462 -0.0109556 0.00774515" quat="-0.0230857 0.705325 -0.0310151 0.707829" mass="0.671673" diaginertia="0.000408942 0.000369691 0.000319519"/>
+          <joint name="upoo_right_J02" pos="0 0 0" axis="1 0 0" range="-3.14 0"/>
+          <geom name="upoo_right_Link_02_visual" class="upoo_visual" rgba="0.752941 0.752941 0.752941 1" mesh="upoo_right_Link_02_mesh"/>
+          <geom name="upoo_right_Link_02_collision" class="upoo_arm_collision" material="hybrid_collision_material" mesh="upoo_right_Link_02_mesh"/>
+          <body name="upoo_right_Link_03" pos="0 -0.06025 0.00774018">
+            <inertial pos="-0.00315896 -0.106389 0.00144827" quat="0.711672 0.7009 -0.0329887 -0.0342721" mass="0.759859" diaginertia="0.00100786 0.000893605 0.000411975"/>
+            <joint name="upoo_right_J03" pos="0 0 0" axis="0 1 0" range="-1.57 1.57"/>
+            <geom name="upoo_right_Link_03_visual" class="upoo_visual" rgba="0.752941 0.752941 0.752941 1" mesh="upoo_right_Link_03_mesh"/>
+            <geom name="upoo_right_Link_03_collision" class="upoo_arm_collision" material="hybrid_collision_material" mesh="upoo_right_Link_03_mesh"/>
+            <body name="upoo_right_Link_04" pos="0 -0.1535 0">
+              <inertial pos="-0.00223566 -0.0572282 0.000925692" quat="0.691229 0.700315 0.124021 -0.127988" mass="0.549724" diaginertia="0.000429735 0.000414103 0.000210087"/>
+              <joint name="upoo_right_J04" pos="0 0 0" axis="0 0 1" range="-0.78 2.6"/>
+              <geom name="upoo_right_Link_04_visual" class="upoo_visual" rgba="0.752941 0.752941 0.752941 1" mesh="upoo_right_Link_04_mesh"/>
+              <geom name="upoo_right_Link_04_collision" class="upoo_arm_collision" material="hybrid_collision_material" mesh="upoo_right_Link_04_mesh"/>
+              <body name="upoo_right_Link_05" pos="0 -0.0955 0">
+                <inertial pos="4.09809e-05 -0.0408892 4.19968e-05" quat="0.679646 0.733522 0.0032854 0.00389921" mass="0.476032" diaginertia="0.000225363 0.000175881 0.000162881"/>
+                <joint name="upoo_right_J05" pos="0 0 0" axis="0 -1 0" range="-1.57 1.57"/>
+                <geom name="upoo_right_Link_05_visual" class="upoo_visual" rgba="0.752941 0.752941 0.752941 1" mesh="upoo_right_Link_05_mesh"/>
+                <geom name="upoo_right_Link_05_collision" class="upoo_arm_collision" material="hybrid_collision_material" mesh="upoo_right_Link_05_mesh"/>
+                <body name="upoo_right_Link_06" pos="0 -0.0455 0">
+                  <inertial pos="-0.0176618 -0.0665195 -6.87551e-05" quat="-0.5 -0.5 -0.5 0.5" mass="0.549977" diaginertia="0.000639 0.000497 0.000342"/>
+                  <joint name="upoo_right_J06" pos="0 0 0" axis="1 0 0" range="-1.57 1.57"/>
+                  <geom name="upoo_right_openarm_v1_link7_collision" class="hybrid_collision" pos="0 0.5585 0" quat="-0.5 -0.5 -0.5 0.5" material="hybrid_collision_material" mesh="hybrid_right_link7_collision"/>
+                  <geom name="upoo_right_openarm_v1_link7_visual_0" class="hybrid_visual" pos="0 0.5585 0" quat="-0.5 -0.5 -0.5 0.5" material="hybrid_metal_silver" mesh="hybrid_right_link7_0_obj"/>
+                  <geom name="upoo_right_openarm_v1_link7_visual_1" class="hybrid_visual" pos="0 0.5585 0" quat="-0.5 -0.5 -0.5 0.5" material="hybrid_matte_black" mesh="hybrid_right_link7_1_obj"/>
+                  <body name="upoo_right_openarm_v1_link8" pos="0.0205 0 -1e-06" quat="-0.5 -0.5 -0.5 0.5">
+                    <body name="upoo_right_openarm_v1_hand" pos="0 -0.025 0.1001">
+                      <inertial pos="0 0.002 0.01" mass="0.15" diaginertia="0.0001 0.00025 0.00017"/>
+                      <geom name="upoo_right_openarm_v1_hand_collision" class="hybrid_collision" pos="0 0.005 -0.6585" quat="1 0 0 0" material="hybrid_collision_material" mesh="hybrid_right_hand_collision"/>
+                      <geom name="upoo_right_openarm_v1_hand_visual_0" class="hybrid_visual" pos="0 0.005 -0.6585" quat="1 0 0 0" material="hybrid_metal_silver" mesh="hybrid_right_hand_0_obj"/>
+                      <geom name="upoo_right_openarm_v1_hand_visual_1" class="hybrid_visual" pos="0 0.005 -0.6585" quat="1 0 0 0" material="hybrid_metal_silver" mesh="hybrid_right_hand_1_obj"/>
+                      <site name="upoo_right_tcp" pos="0 0 0.08" size="0.008" rgba="1 0 0 1"/>
+                      <body name="upoo_right_openarm_v1_right_finger" pos="0 0 0.015">
+                        <inertial pos="0.0064528 -0.01702 0.0219685" mass="0.0360255" diaginertia="2.375e-06 2.375e-06 7.5e-07"/>
+                        <joint name="upoo_right_openarm_v1_finger_joint1" pos="0 0 0" axis="0 -1 0" type="slide" range="0 0.044" armature="0.0002" damping="0.25" frictionloss="0.02"/>
+                        <geom name="upoo_right_openarm_v1_right_finger_collision" class="hybrid_collision" pos="0 0.048 -0.673001" quat="1 0 0 0" material="hybrid_collision_material" mesh="hybrid_right_finger_collision_left"/>
+                        <geom name="upoo_right_openarm_v1_right_finger_visual_0" class="hybrid_visual" pos="0 0.05 -0.673001" quat="1 0 0 0" material="hybrid_default_material" mesh="hybrid_right_finger_0_flip_obj"/>
+                        <geom name="upoo_right_openarm_v1_right_finger_visual_1" class="hybrid_visual" pos="0 0.05 -0.673001" quat="1 0 0 0" material="hybrid_matte_black" mesh="hybrid_right_finger_1_flip_obj"/>
+                        <geom name="upoo_right_finger1_inner_pad" size="0.02 0.001 0.0125" pos="0 0.00476143 0.0675" type="box" condim="6" group="3" priority="4" friction="3 0.05 0.005" solref="0.003" solimp="0.95 0.995 0.0005" rgba="0.15 0.9 0.25 0.18"/>
+                      </body>
+                      <body name="upoo_right_openarm_v1_left_finger" pos="0 0.012 0.015">
+                        <inertial pos="0.0064528 0.01702 0.0219685" mass="0.0360255" diaginertia="2.375e-06 2.375e-06 7.5e-07"/>
+                        <joint name="upoo_right_openarm_v1_finger_joint2" pos="0 0 0" axis="0 1 0" type="slide" range="0 0.044" armature="0.0002" damping="0.25" frictionloss="0.02"/>
+                        <geom name="upoo_right_openarm_v1_left_finger_collision" class="hybrid_collision" pos="0 -0.048 -0.673001" quat="1 0 0 0" material="hybrid_collision_material" mesh="hybrid_right_finger_collision"/>
+                        <geom name="upoo_right_openarm_v1_left_finger_visual_0" class="hybrid_visual" pos="0 -0.05 -0.673001" quat="1 0 0 0" material="hybrid_default_material" mesh="hybrid_right_finger_0_obj"/>
+                        <geom name="upoo_right_openarm_v1_left_finger_visual_1" class="hybrid_visual" pos="0 -0.05 -0.673001" quat="1 0 0 0" material="hybrid_matte_black" mesh="hybrid_right_finger_1_obj"/>
+                        <geom name="upoo_right_finger2_inner_pad" size="0.02 0.001 0.0125" pos="0 -0.00476143 0.0675" type="box" condim="6" group="3" priority="4" friction="3 0.05 0.005" solref="0.003" solimp="0.95 0.995 0.0005" rgba="0.15 0.9 0.25 0.18"/>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+    <body name="upoo_left_base_link" pos="0 -0.12455 0.7" quat="0.707107 0.707107 0 0">
+      <inertial pos="1.98663e-05 -8.4251e-06 -0.0412576" quat="0.000104617 0.70745 0.000691638 0.706763" mass="1.18318" diaginertia="0.00169433 0.00106197 0.00104151"/>
+      <geom name="upoo_left_base_link_visual" class="upoo_visual" rgba="0.752941 0.752941 0.752941 1" mesh="upoo_left_base_link_mesh"/>
+      <geom name="upoo_left_base_link_collision" class="upoo_arm_collision" material="hybrid_collision_material" mesh="upoo_left_base_link_mesh"/>
+      <body name="upoo_left_Link_01">
+        <inertial pos="-4.21745e-09 -0.00124405 0.023055" quat="0.500161 0.499839 0.500161 0.499839" mass="0.350708" diaginertia="0.000495471 0.000438281 0.000285888"/>
+        <joint name="upoo_left_J01" pos="0 0 0" axis="0 0 1" range="-2.82 2.82"/>
+        <geom name="upoo_left_Link_01_visual" class="upoo_visual" rgba="0.752941 0.752941 0.752941 1" mesh="upoo_left_Link_01_mesh"/>
+        <geom name="upoo_left_Link_01_collision" class="upoo_arm_collision" material="hybrid_collision_material" mesh="upoo_left_Link_01_mesh"/>
+        <body name="upoo_left_Link_02" pos="0 0 0.04176">
+          <inertial pos="0.00103462 -0.0109556 0.00774515" quat="-0.0310151 0.707829 -0.0230857 0.705325" mass="0.671673" diaginertia="0.000408942 0.000369691 0.000319519"/>
+          <joint name="upoo_left_J02" pos="0 0 0" axis="1 0 0" range="-3.14 0"/>
+          <geom name="upoo_left_Link_02_visual" class="upoo_visual" rgba="0.752941 0.752941 0.752941 1" mesh="upoo_left_Link_02_mesh"/>
+          <geom name="upoo_left_Link_02_collision" class="upoo_arm_collision" material="hybrid_collision_material" mesh="upoo_left_Link_02_mesh"/>
+          <body name="upoo_left_Link_03" pos="0 -0.06025 0.00774018">
+            <inertial pos="0.00315896 -0.106389 0.00144827" quat="0.711672 0.7009 0.0329887 0.0342721" mass="0.759859" diaginertia="0.00100786 0.000893605 0.000411975"/>
+            <joint name="upoo_left_J03" pos="0 0 0" axis="0 -1 0" range="-1.57 1.57"/>
+            <geom name="upoo_left_Link_03_visual" class="upoo_visual" rgba="0.752941 0.752941 0.752941 1" mesh="upoo_left_Link_03_mesh"/>
+            <geom name="upoo_left_Link_03_collision" class="upoo_arm_collision" material="hybrid_collision_material" mesh="upoo_left_Link_03_mesh"/>
+            <body name="upoo_left_Link_04" pos="0 -0.1535 0">
+              <inertial pos="0.00223566 -0.0572282 0.000925692" quat="0.691229 0.700315 -0.124021 0.127988" mass="0.549724" diaginertia="0.000429735 0.000414103 0.000210087"/>
+              <joint name="upoo_left_J04" pos="0 0 0" axis="0 0 -1" range="-0.78 2.6"/>
+              <geom name="upoo_left_Link_04_visual" class="upoo_visual" rgba="0.752941 0.752941 0.752941 1" mesh="upoo_left_Link_04_mesh"/>
+              <geom name="upoo_left_Link_04_collision" class="upoo_arm_collision" material="hybrid_collision_material" mesh="upoo_left_Link_04_mesh"/>
+              <body name="upoo_left_Link_05" pos="0 -0.0955 0">
+                <inertial pos="-4.09809e-05 -0.0408892 4.19968e-05" quat="0.679646 0.733522 -0.0032854 -0.00389921" mass="0.476032" diaginertia="0.000225363 0.000175881 0.000162881"/>
+                <joint name="upoo_left_J05" pos="0 0 0" axis="0 1 0" range="-1.57 1.57"/>
+                <geom name="upoo_left_Link_05_visual" class="upoo_visual" rgba="0.752941 0.752941 0.752941 1" mesh="upoo_left_Link_05_mesh"/>
+                <geom name="upoo_left_Link_05_collision" class="upoo_arm_collision" material="hybrid_collision_material" mesh="upoo_left_Link_05_mesh"/>
+                <body name="upoo_left_Link_06" pos="0 -0.0455 0">
+                  <inertial pos="0.0176618 -0.0665195 -6.87551e-05" quat="0.5 0.5 -0.5 0.5" mass="0.549977" diaginertia="0.000639 0.000497 0.000342"/>
+                  <joint name="upoo_left_J06" pos="0 0 0" axis="1 0 0" range="-1.57 1.57"/>
+                  <geom name="upoo_left_openarm_v1_link7_collision" class="hybrid_collision" pos="0 0.5585 0" quat="0.5 0.5 -0.5 0.5" material="hybrid_collision_material" mesh="hybrid_left_link7_collision"/>
+                  <geom name="upoo_left_openarm_v1_link7_visual_0" class="hybrid_visual" pos="0 0.5585 0" quat="0.5 0.5 -0.5 0.5" material="hybrid_metal_silver" mesh="hybrid_left_link7_0_obj"/>
+                  <geom name="upoo_left_openarm_v1_link7_visual_1" class="hybrid_visual" pos="0 0.5585 0" quat="0.5 0.5 -0.5 0.5" material="hybrid_matte_black" mesh="hybrid_left_link7_1_obj"/>
+                  <camera name="wrist" target="upoo_left_wrist_camera_target" pos="-0.06 -0.03 -0.06" mode="targetbody" resolution="640 480" fovy="60"/>
+                  <body name="upoo_left_openarm_v1_link8" pos="-0.0205 0 -1e-06" quat="0.5 0.5 -0.5 0.5">
+                    <body name="upoo_left_openarm_v1_hand" pos="0 -0.025 0.1001">
+                      <inertial pos="0 0.002 0.01" mass="0.15" diaginertia="0.0001 0.00025 0.00017"/>
+                      <geom name="upoo_left_openarm_v1_hand_collision" class="hybrid_collision" pos="0 0.005 -0.6585" quat="1 0 0 0" material="hybrid_collision_material" mesh="hybrid_left_hand_collision"/>
+                      <geom name="upoo_left_openarm_v1_hand_visual_0" class="hybrid_visual" pos="0 0.005 -0.6585" quat="1 0 0 0" material="hybrid_metal_silver" mesh="hybrid_left_hand_0_obj"/>
+                      <geom name="upoo_left_openarm_v1_hand_visual_1" class="hybrid_visual" pos="0 0.005 -0.6585" quat="1 0 0 0" material="hybrid_metal_silver" mesh="hybrid_left_hand_1_obj"/>
+                      <site name="upoo_left_tcp" pos="0 0 0.08" size="0.008" rgba="0 1 0 1"/>
+                      <body name="upoo_left_wrist_camera_target" pos="0 0 0.08"/>
+                      <body name="upoo_left_openarm_v1_right_finger" pos="0 0 0.015">
+                        <inertial pos="-0.0064528 -0.01702 0.0219685" mass="0.0360255" diaginertia="2.375e-06 2.375e-06 7.5e-07"/>
+                        <joint name="upoo_left_openarm_v1_finger_joint1" pos="0 0 0" axis="0 -1 0" type="slide" range="0 0.044" armature="0.0002" damping="0.25" frictionloss="0.02"/>
+                        <geom name="upoo_left_openarm_v1_right_finger_collision" class="hybrid_collision" pos="0 0.048 -0.673001" quat="1 0 0 0" material="hybrid_collision_material" mesh="hybrid_left_finger_collision_left"/>
+                        <geom name="upoo_left_openarm_v1_right_finger_visual_0" class="hybrid_visual" pos="0 0.05 -0.673001" quat="1 0 0 0" material="hybrid_default_material" mesh="hybrid_left_finger_0_flip_obj"/>
+                        <geom name="upoo_left_openarm_v1_right_finger_visual_1" class="hybrid_visual" pos="0 0.05 -0.673001" quat="1 0 0 0" material="hybrid_matte_black" mesh="hybrid_left_finger_1_flip_obj"/>
+                        <geom name="upoo_left_finger1_inner_pad" size="0.02 0.001 0.0125" pos="0 0.00476143 0.0675" type="box" condim="6" group="3" priority="4" friction="3 0.05 0.005" solref="0.003" solimp="0.95 0.995 0.0005" rgba="0.15 0.9 0.25 0.18"/>
+                      </body>
+                      <body name="upoo_left_openarm_v1_left_finger" pos="0 0.012 0.015">
+                        <inertial pos="-0.0064528 0.01702 0.0219685" mass="0.0360255" diaginertia="2.375e-06 2.375e-06 7.5e-07"/>
+                        <joint name="upoo_left_openarm_v1_finger_joint2" pos="0 0 0" axis="0 1 0" type="slide" range="0 0.044" armature="0.0002" damping="0.25" frictionloss="0.02"/>
+                        <geom name="upoo_left_openarm_v1_left_finger_collision" class="hybrid_collision" pos="0 -0.048 -0.673001" quat="1 0 0 0" material="hybrid_collision_material" mesh="hybrid_left_finger_collision"/>
+                        <geom name="upoo_left_openarm_v1_left_finger_visual_0" class="hybrid_visual" pos="0 -0.05 -0.673001" quat="1 0 0 0" material="hybrid_default_material" mesh="hybrid_left_finger_0_obj"/>
+                        <geom name="upoo_left_openarm_v1_left_finger_visual_1" class="hybrid_visual" pos="0 -0.05 -0.673001" quat="1 0 0 0" material="hybrid_matte_black" mesh="hybrid_left_finger_1_obj"/>
+                        <geom name="upoo_left_finger2_inner_pad" size="0.02 0.001 0.0125" pos="0 -0.00476143 0.0675" type="box" condim="6" group="3" priority="4" friction="3 0.05 0.005" solref="0.003" solimp="0.95 0.995 0.0005" rgba="0.15 0.9 0.25 0.18"/>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+    <body name="table" pos="-0.45 0 0.35">
+      <geom name="table_top" size="0.4 0.3 0.02" type="box" material="table_mat"/>
+      <geom name="table_leg1" size="0.02 0.02 0.33" pos="0.35 0.25 -0.35" type="box"/>
+      <geom name="table_leg2" size="0.02 0.02 0.33" pos="0.35 -0.25 -0.35" type="box"/>
+      <geom name="table_leg3" size="0.02 0.02 0.33" pos="-0.35 0.25 -0.35" type="box"/>
+      <geom name="table_leg4" size="0.02 0.02 0.33" pos="-0.35 -0.25 -0.35" type="box"/>
+    </body>
+    <body name="cup">
+      <joint type="free" armature="0" damping="0" frictionloss="0"/>
+      <geom name="cup_body" class="cup_col" mass="0.25"/>
+      <geom name="cup_vis" size="0.02 0.02 0.02" type="box" contype="0" conaffinity="0" material="red"/>
+    </body>
+    <body name="basket" pos="-0.5 -0.2 0.37">
+      <geom name="basket_bottom" size="0.065 0.065 0.0025" pos="0 0 0.0025" type="box" friction="1 0.1 0.1" rgba="0.12 0.42 0.85 1"/>
+      <geom name="basket_left_wall" size="0.0025 0.065 0.0275" pos="-0.0625 0 0.0325" type="box" friction="1 0.1 0.1" rgba="0.12 0.42 0.85 1"/>
+      <geom name="basket_right_wall" size="0.0025 0.065 0.0275" pos="0.0625 0 0.0325" type="box" friction="1 0.1 0.1" rgba="0.12 0.42 0.85 1"/>
+      <geom name="basket_front_wall" size="0.06 0.0025 0.0275" pos="0 -0.0625 0.0325" type="box" friction="1 0.1 0.1" rgba="0.12 0.42 0.85 1"/>
+      <geom name="basket_back_wall" size="0.06 0.0025 0.0275" pos="0 0.0625 0.0325" type="box" friction="1 0.1 0.1" rgba="0.12 0.42 0.85 1"/>
+    </body>
+  </worldbody>
+
+  <contact>
+    <exclude body1="upoo_right_base_link" body2="upoo_right_Link_01"/>
+    <exclude body1="upoo_right_base_link" body2="upoo_right_Link_02"/>
+    <exclude body1="upoo_right_base_link" body2="upoo_right_Link_03"/>
+    <exclude body1="upoo_right_base_link" body2="upoo_left_Link_03"/>
+    <exclude body1="upoo_right_base_link" body2="upoo_left_Link_04"/>
+    <exclude body1="upoo_right_Link_01" body2="upoo_right_Link_02"/>
+    <exclude body1="upoo_right_Link_01" body2="upoo_right_Link_03"/>
+    <exclude body1="upoo_right_Link_01" body2="upoo_left_Link_03"/>
+    <exclude body1="upoo_right_Link_01" body2="upoo_left_Link_04"/>
+    <exclude body1="upoo_right_Link_02" body2="upoo_right_Link_03"/>
+    <exclude body1="upoo_right_Link_02" body2="upoo_left_Link_03"/>
+    <exclude body1="upoo_right_Link_02" body2="upoo_left_Link_04"/>
+    <exclude body1="upoo_right_Link_03" body2="upoo_right_Link_04"/>
+    <exclude body1="upoo_right_Link_04" body2="upoo_right_Link_05"/>
+    <exclude body1="upoo_right_Link_05" body2="upoo_right_Link_06"/>
+    <exclude body1="upoo_right_openarm_v1_hand" body2="upoo_right_openarm_v1_right_finger"/>
+    <exclude body1="upoo_right_openarm_v1_hand" body2="upoo_right_openarm_v1_left_finger"/>
+    <exclude body1="upoo_left_base_link" body2="upoo_left_Link_01"/>
+    <exclude body1="upoo_left_base_link" body2="upoo_left_Link_02"/>
+    <exclude body1="upoo_left_base_link" body2="upoo_left_Link_03"/>
+    <exclude body1="upoo_left_Link_01" body2="upoo_left_Link_02"/>
+    <exclude body1="upoo_left_Link_01" body2="upoo_left_Link_03"/>
+    <exclude body1="upoo_left_Link_02" body2="upoo_left_Link_03"/>
+    <exclude body1="upoo_left_Link_03" body2="upoo_left_Link_04"/>
+    <exclude body1="upoo_left_Link_04" body2="upoo_left_Link_05"/>
+    <exclude body1="upoo_left_Link_05" body2="upoo_left_Link_06"/>
+    <exclude body1="upoo_left_openarm_v1_hand" body2="upoo_left_openarm_v1_right_finger"/>
+    <exclude body1="upoo_left_openarm_v1_hand" body2="upoo_left_openarm_v1_left_finger"/>
+  </contact>
+
+  <equality>
+    <joint name="upoo_right_gripper_equal" joint1="upoo_right_openarm_v1_finger_joint1" joint2="upoo_right_openarm_v1_finger_joint2" polycoef="0 1 0 0 0" solref="0.005" solimp="0.95 0.99"/>
+    <joint name="upoo_left_gripper_equal" joint1="upoo_left_openarm_v1_finger_joint1" joint2="upoo_left_openarm_v1_finger_joint2" polycoef="0 1 0 0 0" solref="0.005" solimp="0.95 0.99"/>
+  </equality>
+
+  <tendon>
+    <fixed name="upoo_right_gripper_tendon" limited="true" range="0 0.044">
+      <joint joint="upoo_right_openarm_v1_finger_joint1" coef="0.5"/>
+      <joint joint="upoo_right_openarm_v1_finger_joint2" coef="0.5"/>
+    </fixed>
+    <fixed name="upoo_left_gripper_tendon" limited="true" range="0 0.044">
+      <joint joint="upoo_left_openarm_v1_finger_joint1" coef="0.5"/>
+      <joint joint="upoo_left_openarm_v1_finger_joint2" coef="0.5"/>
+    </fixed>
+  </tendon>
+
+  <actuator>
+    <general name="upoo_right_J01_ctrl" joint="upoo_right_J01" ctrllimited="true" ctrlrange="-2.82 2.82" forcelimited="true" forcerange="-25 25" biastype="affine" gainprm="180" biasprm="0 -180 -12"/>
+    <general name="upoo_right_J02_ctrl" joint="upoo_right_J02" ctrllimited="true" ctrlrange="-3.14 1.57" forcelimited="true" forcerange="-30 30" biastype="affine" gainprm="220" biasprm="0 -220 -14"/>
+    <general name="upoo_right_J03_ctrl" joint="upoo_right_J03" ctrllimited="true" ctrlrange="-1.57 1.57" forcelimited="true" forcerange="-25 25" biastype="affine" gainprm="180" biasprm="0 -180 -12"/>
+    <general name="upoo_right_J04_ctrl" joint="upoo_right_J04" ctrllimited="true" ctrlrange="-0.78 2.6" forcelimited="true" forcerange="-15 15" biastype="affine" gainprm="120" biasprm="0 -120 -8"/>
+    <general name="upoo_right_J05_ctrl" joint="upoo_right_J05" ctrllimited="true" ctrlrange="-1.57 1.57" forcelimited="true" forcerange="-10 10" biastype="affine" gainprm="100" biasprm="0 -100 -7"/>
+    <general name="upoo_right_J06_ctrl" joint="upoo_right_J06" ctrllimited="true" ctrlrange="-1.57 1.57" forcelimited="true" forcerange="-8 8" biastype="affine" gainprm="80" biasprm="0 -80 -5"/>
+    <general name="upoo_left_J01_ctrl" joint="upoo_left_J01" ctrllimited="true" ctrlrange="-2.82 2.82" forcelimited="true" forcerange="-25 25" biastype="affine" gainprm="180" biasprm="0 -180 -12"/>
+    <general name="upoo_left_J02_ctrl" joint="upoo_left_J02" ctrllimited="true" ctrlrange="-3.14 1.57" forcelimited="true" forcerange="-30 30" biastype="affine" gainprm="220" biasprm="0 -220 -14"/>
+    <general name="upoo_left_J03_ctrl" joint="upoo_left_J03" ctrllimited="true" ctrlrange="-1.57 1.57" forcelimited="true" forcerange="-25 25" biastype="affine" gainprm="180" biasprm="0 -180 -12"/>
+    <general name="upoo_left_J04_ctrl" joint="upoo_left_J04" ctrllimited="true" ctrlrange="-0.78 2.6" forcelimited="true" forcerange="-15 15" biastype="affine" gainprm="120" biasprm="0 -120 -8"/>
+    <general name="upoo_left_J05_ctrl" joint="upoo_left_J05" ctrllimited="true" ctrlrange="-1.57 1.57" forcelimited="true" forcerange="-10 10" biastype="affine" gainprm="100" biasprm="0 -100 -7"/>
+    <general name="upoo_left_J06_ctrl" joint="upoo_left_J06" ctrllimited="true" ctrlrange="-1.57 1.57" forcelimited="true" forcerange="-8 8" biastype="affine" gainprm="80" biasprm="0 -80 -5"/>
+    <general name="upoo_right_gripper_ctrl" tendon="upoo_right_gripper_tendon" ctrllimited="true" ctrlrange="0 0.044" forcelimited="true" forcerange="-30 30" biastype="affine" gainprm="1000" biasprm="0 -1000 -20"/>
+    <general name="upoo_left_gripper_ctrl" tendon="upoo_left_gripper_tendon" ctrllimited="true" ctrlrange="0 0.044" forcelimited="true" forcerange="-30 30" biastype="affine" gainprm="1000" biasprm="0 -1000 -20"/>
+  </actuator>
+</mujoco>

@@ -23,7 +23,8 @@ import mujoco
 import openarm_mujoco.v2 as openarm_mujoco
 
 from kio_teleop_openarm.lib.transforms import (
-    euler_xyz_deg_to_quat_xyzw, quat_xyzw_to_matrix, make_transform, project_to_rotation_matrix)
+    euler_xyz_deg_to_quat_xyzw, quat_xyzw_to_matrix, quat_xyzw_from_matrix,
+    quat_error, make_transform, project_to_rotation_matrix)
 from kio_teleop_openarm.lib.ik_solver import IKSolver, target_pose_from_hand
 from kio_teleop_openarm.lib.calibration import Calibrator
 from kio_teleop_openarm.lib.auto_grasp import AutoGrasp
@@ -38,8 +39,8 @@ RIGHT_ARM_JOINT_NAMES = [
     "upoo_right_Base_J01", "upoo_right_J02", "upoo_right_J03",
     "upoo_right_J04", "upoo_right_J05", "upoo_right_J06",
 ]
-LEFT_FINGER_JOINT_NAMES = ["upoo_left_finger_left_joint", "upoo_left_finger_right_joint"]
-RIGHT_FINGER_JOINT_NAMES = ["upoo_right_finger_left_joint", "upoo_right_finger_right_joint"]
+LEFT_FINGER_JOINT_NAMES = ["upoo_left_finger_right_joint", "upoo_left_finger_left_joint"]
+RIGHT_FINGER_JOINT_NAMES = ["upoo_right_finger_right_joint", "upoo_right_finger_left_joint"]
 LEFT_EE_BODY_NAME = "upoo_left_Link_06"
 RIGHT_EE_BODY_NAME = "upoo_right_Link_06"
 ALL_ARM_JOINTS = LEFT_ARM_JOINT_NAMES + RIGHT_ARM_JOINT_NAMES
@@ -104,7 +105,33 @@ class ControllerNode(Node):
         else:
             raise ValueError(f"Unknown model_type '{model_type}'")
         self.get_logger().info(f"Loading model: {xml_path}")
-        self.model = mujoco.MjModel.from_xml_path(xml_path)
+
+        with open(xml_path, 'r') as f:
+            xml_str = f.read()
+
+        # Inject table + cup if not present (match simulator)
+        if "name=\"table\"" not in xml_str and "name=\"cup\"" not in xml_str:
+            scene_injects = (
+                '    <body name="table" pos="-0.3 0 0.24">'
+                '<geom name="table_top" type="box" size="0.25 0.2 0.2" rgba="0.5 0.5 0.5 1"/>'
+                '</body>'
+                '    <body name="cup" pos="-0.3 0 0.49">'
+                '<freejoint/>'
+                '<geom name="cup_col" type="box" size="0.025 0.025 0.025" mass="0.05" '
+                'rgba="0.9 0.15 0.15 1"/>'
+                '</body>'
+            )
+            xml_str = xml_str.replace("<worldbody>", "<worldbody>" + scene_injects)
+
+        import tempfile
+        xml_dir = os.path.dirname(xml_path)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', dir=xml_dir, delete=False) as tf:
+            tf.write(xml_str)
+            tmp_xml_path = tf.name
+        try:
+            self.model = mujoco.MjModel.from_xml_path(tmp_xml_path)
+        finally:
+            os.unlink(tmp_xml_path)
         self.data = mujoco.MjData(self.model)
 
         # ── Joint indices ──
@@ -317,10 +344,6 @@ class ControllerNode(Node):
         return response
 
     def _auto_grasp_srv_cb(self, request, response):
-        if not self.calibrator.calibration_ready:
-            response.success = False
-            response.message = "Please calibrate first (P)"
-            return response
         cup_body_id = -1
         try:
             cup_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "cup")
@@ -371,44 +394,71 @@ class ControllerNode(Node):
     def _control_loop(self):
         cal = self.calibrator
 
-        if self._t_vuer_head is not None:
-            # Calibration check (only when VR data available)
+        has_valid_vr = (
+            self._t_vuer_head is not None
+            and np.linalg.norm(self._t_vuer_head[:3, 3]) >= 0.001
+        )
+        ag = self.auto_grasp
+        ag_active = ag.active and ag.target_matrix is not None
+
+        if not has_valid_vr and not ag_active:
+            return
+
+        # ── VR calibration & IK targets ──
+        if has_valid_vr:
             status = cal.maybe_capture(
                 self._t_vuer_head, self._t_vuer_left, self._t_vuer_right,
                 lambda side: self._get_body_pose_world(side))
             if status:
                 self.get_logger().info(status)
 
-        if not cal.calibration_ready:
-            # Publish home joint position even before calibration
-            self._publish_joint_target()
-            return
+            if not cal.calibration_ready:
+                self._publish_joint_target()
+                return
 
-        # ── IK ──
-        t_robotbase_left_current = (cal.t_robotbase_vuer @ self._t_vuer_left).astype(np.float32)
-        t_robotbase_right_current = (cal.t_robotbase_vuer @ self._t_vuer_right).astype(np.float32)
+            t_robotbase_left_current = (cal.t_robotbase_vuer @ self._t_vuer_left).astype(np.float32)
+            t_robotbase_right_current = (cal.t_robotbase_vuer @ self._t_vuer_right).astype(np.float32)
 
-        t_robotbase_left_target = target_pose_from_hand(
-            t_robotbase_left_current, cal.t_robotbase_left_hand_ref,
-            cal.t_robotbase_left_eef_ref, self.position_scale)
-        t_robotbase_right_target = target_pose_from_hand(
-            t_robotbase_right_current, cal.t_robotbase_right_hand_ref,
-            cal.t_robotbase_right_eef_ref, self.position_scale)
+            t_robotbase_left_target = target_pose_from_hand(
+                t_robotbase_left_current, cal.t_robotbase_left_hand_ref,
+                cal.t_robotbase_left_eef_ref, self.position_scale)
+            t_robotbase_right_target = target_pose_from_hand(
+                t_robotbase_right_current, cal.t_robotbase_right_hand_ref,
+                cal.t_robotbase_right_eef_ref, self.position_scale)
 
-        t_world_left_target = (self.t_world_robotbase @ t_robotbase_left_target).astype(np.float32)
-        t_world_right_target = (self.t_world_robotbase @ t_robotbase_right_target).astype(np.float32)
+            t_world_left_target = (self.t_world_robotbase @ t_robotbase_left_target).astype(np.float32)
+            t_world_right_target = (self.t_world_robotbase @ t_robotbase_right_target).astype(np.float32)
+        else:
+            # No VR — hold current arm positions
+            t_world_left_target = self._get_body_pose_world('left')
+            t_world_right_target = self._get_body_pose_world('right')
 
-        # Auto grasp override
-        if self.auto_grasp.active and self.auto_grasp.target_matrix is not None:
-            ee_body = (self.left_body if self.auto_grasp.arm == "left"
+        # Auto grasp override (runs regardless of VR state)
+        if ag_active:
+            ee_body = (self.left_body if ag.arm == "left"
                        else self.right_body)
             ee_pos = self.data.xpos[ee_body].copy()
-            smoothed = self.auto_grasp.get_smoothed_target(ee_pos)
+            smoothed = ag.get_smoothed_target(ee_pos)
             if smoothed is not None:
-                if self.auto_grasp.arm == "left":
+                if ag.arm == "left":
                     t_world_left_target = smoothed
                 else:
                     t_world_right_target = smoothed
+                # Debug: print orientation every second
+                if not hasattr(self, '_ag_debug_cnt'):
+                    self._ag_debug_cnt = 0
+                self._ag_debug_cnt += 1
+                if self._ag_debug_cnt % 60 == 1:
+                    cur_quat = self.data.xquat[ee_body]
+                    tgt_mat = smoothed[:3, :3]
+                    tgt_quat_xyzw = quat_xyzw_from_matrix(tgt_mat)
+                    body_xyzw = np.array([cur_quat[1], cur_quat[2], cur_quat[3], cur_quat[0]])
+                    ori_err = np.linalg.norm(quat_error(body_xyzw, tgt_quat_xyzw))
+                    self.get_logger().info(
+                        f"[AG debug] body_quat(xyzw)=[{body_xyzw[0]:.4f},{body_xyzw[1]:.4f},{body_xyzw[2]:.4f},{body_xyzw[3]:.4f}] "
+                        f"tgt_quat(xyzw)=[{tgt_quat_xyzw[0]:.4f},{tgt_quat_xyzw[1]:.4f},{tgt_quat_xyzw[2]:.4f},{tgt_quat_xyzw[3]:.4f}] "
+                        f"ori_err={ori_err:.4f} rad ({np.degrees(ori_err):.1f} deg)"
+                    )
 
         # Solve IK
         dq_l = self.left_ik.solve(t_world_left_target)
@@ -424,7 +474,15 @@ class ControllerNode(Node):
             self.q_smoothed[self.arm_qpos_indices] = self.data.qpos[self.arm_qpos_indices]
 
         # ── Gripper ──
-        if self._gripper_manual_override is None:
+        # Auto grasp gripper command takes precedence
+        if ag.gripper_cmd is not None:
+            cmd_side, cmd_val = ag.gripper_cmd
+            if cmd_side == "left":
+                self.left_gripper_cmd = cmd_val
+            else:
+                self.right_gripper_cmd = cmd_val
+            ag.gripper_cmd = None  # consume
+        elif has_valid_vr and self._gripper_manual_override is None:
             lm_left_ok = self._left_landmarks is not None and self._left_landmarks.shape[0] >= 10
             lm_right_ok = self._right_landmarks is not None and self._right_landmarks.shape[0] >= 10
             if lm_left_ok:

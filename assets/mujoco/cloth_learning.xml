@@ -1,0 +1,42 @@
+<mujoco model="cloth_learning">
+  <option
+      timestep="0.002"
+      solver="CG"
+      jacobian="sparse"
+      cone="pyramidal"/>
+
+  <worldbody>
+    <light pos="0 0 2"/>
+
+    <geom
+        name="table"
+        type="box"
+        pos="0 0 0"
+        size="0.5 0.5 0.03"/>
+
+    <flexcomp
+        name="cloth"
+        type="grid"
+        count="20 20 1"
+        spacing="0.025 0.025 0.025"
+        dim="2"
+        pos="0 0 0.20"
+        mass="0.05"
+        radius="0.003"
+        rgba="0.8 0.2 0.2 1">
+
+      <edge equality="true"/>
+
+      <contact
+          selfcollide="auto"
+          condim="3"/>
+
+      <elasticity
+          young="3e3"
+          poisson="0"
+          thickness="0.002"
+          damping="1e-3"
+          elastic2d="bend"/>
+    </flexcomp>
+  </worldbody>
+</mujoco>

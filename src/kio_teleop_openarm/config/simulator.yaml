@@ -1,6 +1,6 @@
 simulator:
   ros__parameters:
-    model_type: "upoo_bimanual"
+    model_type: "/home/kiorobot/kio_robot_zzc/kio_ros2_ws/assets/mujoco/upoo_openarm_v1_hybrid_cartesian_grasp_scene_v2.xml"
     robot_x: 0.0
     robot_y: 0.0
     robot_z: 0.0

@@ -1,0 +1,58 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mujoco model="upoo_openarm_v1_hybrid_cartesian_grasp_scene_v2">
+  <compiler angle="radian" autolimits="true" />
+  <option timestep="0.001" gravity="0 0 -9.81" integrator="implicitfast" iterations="150" cone="elliptic">
+    <flag multiccd="enable" />
+  </option>
+  <statistic center="0 0 0.85" extent="1.5" />
+  <visual>
+    <headlight diffuse="0.65 0.65 0.65" ambient="0.3 0.3 0.3" specular="0.1 0.1 0.1" />
+    <rgba haze="0.15 0.25 0.35 1" />
+    <global azimuth="-45" elevation="-22" orthographic="false" fovy="45" />
+  </visual>
+  <default>
+    <default class="scene_collision">
+      <geom contype="1" conaffinity="1" condim="3" solref="0.02 1" solimp="0.9 0.95 0.001" friction="0.5 0.01 0.01"/>
+    </default>
+    <default class="cup_collision">
+      <geom contype="1" conaffinity="1" condim="6" solref="0.02 1" solimp="0.9 0.95 0.001" friction="1.5 0.3 0.05"/>
+    </default>
+  </default>
+  <asset>
+    <texture name="upoo_skybox" type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072" />
+    <texture name="upoo_grid_tex" type="2d" builtin="checker" rgb1="0.18 0.28 0.38" rgb2="0.08 0.15 0.22" width="512" height="512" />
+    <material name="upoo_grid_mat" texture="upoo_grid_tex" texrepeat="8 8" reflectance="0.12" />
+    <model name="upoo_bimanual_vertical_mirrored_model" file="/home/kiorobot/kio_robot_zzc/kio_upoo-main/openarm_mujoco-master/v2/upoo_openarm_v1_hybrid_grasp_bimanual_v4.xml" />
+    <material name="grasp_table_material" rgba="0.34 0.22 0.12 1" reflectance="0.05" shininess="0.15" />
+    <material name="grasp_cube_material" rgba="0.95 0.25 0.08 1" reflectance="0.05" shininess="0.25" />
+  </asset>
+  <worldbody>
+    <light name="upoo_key_light" pos="1 -1 3" dir="-0.3 0.2 -1" directional="true" />
+    <geom name="upoo_floor" type="plane" size="3 3 0.1" material="upoo_grid_mat" contype="1" conaffinity="1" condim="6" priority="1" friction="1.0 0.02 0.002" solref="0.003 1" solimp="0.95 0.995 0.0005" />
+    <body name="upoo_vertical_support">
+      <geom name="upoo_vertical_support_bar" type="box" pos="0 0 0.35" size="0.04 0.04 0.35" rgba="0.18 0.18 0.23 1" contype="1" conaffinity="1" condim="6" priority="1" friction="0.8 0.02 0.002" solref="0.003 1" solimp="0.95 0.995 0.0005" />
+      <attach model="upoo_bimanual_vertical_mirrored_model" prefix="" />
+    </body>
+  </worldbody>
+  <custom>
+    <numeric name="grasp_pregrasp_q" data="-1.75308 -0.05339 -0.05673 -0.78 1.49347 -0.98625" />
+    <numeric name="grasp_lift_q" data="-2.054 -0.05087 -0.05262 -0.76907 1.49761 -1.28598" />
+    <numeric name="grasp_open" data="0.03" />
+    <numeric name="grasp_close" data="0.0165" />
+    <numeric name="grasp_table_top" data="0.548560201378" />
+    <numeric name="grasp_cube_initial" data="-0.324099268915 0.186413462694 0.579060201378" />
+    <numeric name="grasp_visible_contact_version" data="4" />
+    <numeric name="cartesian_start_q" data="0 0 0 1.5 1.57 0" />
+    <numeric name="cartesian_bottom_q" data="-0.320995029244 -1e-08 -0.00501110771504 0.223868170725 1.56534550732 0.95508601755" />
+    <numeric name="cartesian_descent" data="0.1" />
+    <numeric name="cartesian_open" data="0.04" />
+    <numeric name="cartesian_close" data="0.005" />
+    <numeric name="cartesian_table_top" data="0.414663186327" />
+    <numeric name="cartesian_cube_initial" data="-0.322662360248 0.175740171993 0.445163186327" />
+    <numeric name="cartesian_start_tcp" data="-0.320295457451 0.169550178743 0.563533707546" />
+    <numeric name="cartesian_bottom_tcp" data="-0.320169194032 0.169739723025 0.463830845344" />
+    <numeric name="cartesian_pad_overlap" data="0.0123890955272 0.0122864848028" />
+    <numeric name="cartesian_required_pad_overlap" data="0.012" />
+    <numeric name="cartesian_scene_version" data="2" />
+  </custom>
+</mujoco>
