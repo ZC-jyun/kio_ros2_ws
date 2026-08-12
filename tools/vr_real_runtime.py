@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 
-_KEY_CODES = {"e": 18, "r": 19, "i": 23}
+_KEY_CODES = {"e": 18, "r": 19, "u": 22, "i": 23, "d": 32}
 _CODE_KEYS = {code: key for key, code in _KEY_CODES.items()}
 _EV_KEY = 1
 _INPUT_EVENT = struct.Struct("llHHI")
@@ -74,7 +74,7 @@ def discover_keyboard_devices(proc_path="/proc/bus/input/devices"):
 
 
 class KeyboardSafetyMonitor:
-    """Read global Linux key down/up events for I, R and E."""
+    """Read global Linux key down/up events for I, R, U, D and E."""
 
     def __init__(self, device=None, proc_path="/proc/bus/input/devices"):
         self.requested_device = Path(device).expanduser() if device else None
@@ -223,6 +223,8 @@ class DryRunHardwareBridge:
         control_frequency=1000.0,
         smoothing_tau=0.03,
         max_speed=2.0,
+        feedforward_torque_limit=None,
+        feedforward_torque_slew=None,
         **_,
     ):
         self._enable_gripper = bool(enable_gripper)
@@ -234,12 +236,25 @@ class DryRunHardwareBridge:
         self._thread = None
         self._emergency_stop = False
         self._target_q = np.zeros(7, dtype=np.float64)
+        self._target_feedforward_tau = np.zeros(7, dtype=np.float64)
         self._last_sent_q = np.zeros(7, dtype=np.float64)
+        self._last_sent_feedforward_tau = np.zeros(7, dtype=np.float64)
         self._last_read_q = np.zeros(7, dtype=np.float64)
         self._last_read_dq = np.zeros(7, dtype=np.float64)
         self._last_read_torque = np.zeros(7, dtype=np.float64)
         self._motor_err = np.zeros(7, dtype=np.int32)
         self._feedback_time = 0.0
+        self._loop_frequency_hz = 0.0
+        self._loop_mean_dt = 0.0
+        self._loop_max_dt = 0.0
+        self._feedforward_torque_limit = np.broadcast_to(
+            3.0 if feedforward_torque_limit is None else feedforward_torque_limit,
+            7,
+        ).astype(np.float64).copy()
+        self._feedforward_torque_slew = np.broadcast_to(
+            5.0 if feedforward_torque_slew is None else feedforward_torque_slew,
+            7,
+        ).astype(np.float64).copy()
 
     def start(self):
         if self._thread is not None and self._thread.is_alive():
@@ -247,7 +262,9 @@ class DryRunHardwareBridge:
         with self._lock:
             self._emergency_stop = False
             self._target_q[:] = self._last_read_q
+            self._target_feedforward_tau[:] = 0.0
             self._last_sent_q[:] = self._last_read_q
+            self._last_sent_feedforward_tau[:] = 0.0
             self._feedback_time = time.monotonic()
         self._running.set()
         self._thread = threading.Thread(
@@ -255,13 +272,30 @@ class DryRunHardwareBridge:
         )
         self._thread.start()
 
-    def set_target(self, target):
+    def set_target(self, target, feedforward_torque=None):
         target = np.asarray(target, dtype=np.float64).reshape(-1)
         if target.shape != (7,) or not np.isfinite(target).all():
             raise ValueError("Dry-run motor target must contain seven finite values")
+        if feedforward_torque is None:
+            feedforward_torque = np.zeros(7, dtype=np.float64)
+        feedforward_torque = np.asarray(
+            feedforward_torque, dtype=np.float64
+        ).reshape(-1)
+        if (
+            feedforward_torque.shape != (7,)
+            or not np.isfinite(feedforward_torque).all()
+        ):
+            raise ValueError(
+                "Dry-run feedforward torque must contain seven finite values"
+            )
         with self._lock:
             if not self._emergency_stop:
                 self._target_q[:] = target
+                self._target_feedforward_tau[:] = np.clip(
+                    feedforward_torque,
+                    -self._feedforward_torque_limit,
+                    self._feedforward_torque_limit,
+                )
 
     def get_state(self):
         with self._lock:
@@ -280,9 +314,24 @@ class DryRunHardwareBridge:
         with self._lock:
             return self._last_sent_q.copy()
 
+    def get_sent_feedforward_torque(self):
+        with self._lock:
+            return self._last_sent_feedforward_tau.copy()
+
+    def get_control_timing(self):
+        with self._lock:
+            return {
+                "frequency_hz": float(self._loop_frequency_hz),
+                "mean_dt": float(self._loop_mean_dt),
+                "max_dt": float(self._loop_max_dt),
+                "target_frequency_hz": float(self._frequency),
+            }
+
     def emergency_stop(self):
         with self._lock:
             self._emergency_stop = True
+            self._target_feedforward_tau[:] = 0.0
+            self._last_sent_feedforward_tau[:] = 0.0
         self._running.clear()
 
     def stop(self):
@@ -307,13 +356,36 @@ class DryRunHardwareBridge:
                     self._max_speed * dt,
                 )
                 self._last_sent_q += delta
+                max_tau_delta = self._feedforward_torque_slew * min(dt, 0.05)
+                self._last_sent_feedforward_tau += np.clip(
+                    self._target_feedforward_tau
+                    - self._last_sent_feedforward_tau,
+                    -max_tau_delta,
+                    max_tau_delta,
+                )
                 old_q = self._last_read_q.copy()
                 feedback_alpha = 1.0 - np.exp(-dt / 0.02)
                 self._last_read_q += feedback_alpha * (
                     self._last_sent_q - self._last_read_q
                 )
                 self._last_read_dq[:] = (self._last_read_q - old_q) / dt
+                self._last_read_torque[:] = self._last_sent_feedforward_tau
                 self._feedback_time = time.monotonic()
+                instant_frequency = 1.0 / dt
+                if self._loop_frequency_hz == 0.0:
+                    self._loop_frequency_hz = instant_frequency
+                    self._loop_mean_dt = dt
+                    self._loop_max_dt = dt
+                else:
+                    self._loop_frequency_hz = (
+                        0.9 * self._loop_frequency_hz
+                        + 0.1 * instant_frequency
+                    )
+                    self._loop_mean_dt = 0.9 * self._loop_mean_dt + 0.1 * dt
+                    self._loop_max_dt = max(
+                        0.95 * self._loop_max_dt,
+                        dt,
+                    )
             remaining = period - (time.monotonic() - start)
             if remaining > 0:
                 time.sleep(remaining)

@@ -36,6 +36,7 @@ for path in (TOOLS_DIR, HARDWARE_LIB_DIR):
 
 import upoo_motor_constants as umc
 from teleop_upoo_hardware import HardwareMotorBridge
+from return_upoo_to_zero import minimum_jerk_fraction, trajectory_duration
 import vr_collect_act_grasp_data as sim_collector
 from vr_real_runtime import (
     DryRunHardwareBridge,
@@ -54,6 +55,215 @@ REAL_OUTPUT_DIR = WS / "data" / "real_vr_grasp"
 DEFAULT_CERT_FILE = DEPLOY_DIR / "192.168.0.5+2.pem"
 DEFAULT_KEY_FILE = DEPLOY_DIR / "192.168.0.5+2-key.pem"
 DEFAULT_GRIPPER_MOTOR_OPEN_POS = 5.0
+DEFAULT_CTRL_C_RETURN_SPEED = 0.10
+CTRL_C_RETURN_RATE_HZ = 100.0
+CTRL_C_RETURN_SETTLE_TIMEOUT_SEC = 5.0
+# The shared hardware bridge defaults are deliberately slow first-motion
+# values (0.2--0.3 rad/s). They make a hand-tracking Cartesian controller
+# accumulate a large target backlog. These per-axis limits are still well
+# below the configured DM MIT velocity ranges, while the command-lead guard
+# below bounds how far a target may get ahead of fresh CAN feedback.
+DEFAULT_MOTOR_MAX_SPEED = (0.8, 0.8, 0.8, 1.2, 1.2, 1.2, 2.0)
+DEFAULT_STEREO_CAMERA_DEVICE = Path(
+    "/dev/v4l/by-id/"
+    "usb-SunplusIT_Inc_SPCA2100_PC_Camera-video-index0"
+)
+STEREO_CAMERA_NAMES = ("stereo_left", "stereo_right")
+
+ARM_JOINT_NAMES = tuple(name for name, _, _ in umc.ARM_MOTOR_CONFIG)
+ZERO_POSE = np.zeros(umc.ARM_DOF, dtype=np.float64)
+ACT_JOINT_NAMES = tuple(
+    [f"left_{name}" for name in ARM_JOINT_NAMES]
+    + ["left_gripper"]
+    + [f"right_{name}" for name in ARM_JOINT_NAMES]
+    + ["right_gripper"]
+)
+ACT_STATE_DIM = len(ACT_JOINT_NAMES)
+ACTIVE_ARM_MASK = np.asarray([1, 0], dtype=np.uint8)
+
+
+class StereoRGBCamera:
+    """Continuously read a side-by-side UVC stereo stream off the control loop."""
+
+    def __init__(
+        self,
+        device,
+        *,
+        raw_width,
+        raw_height,
+        output_width,
+        output_height,
+        fps,
+    ):
+        self.device = Path(device).expanduser()
+        self.raw_width = int(raw_width)
+        self.raw_height = int(raw_height)
+        self.output_width = int(output_width)
+        self.output_height = int(output_height)
+        self.fps = float(fps)
+        self._capture = None
+        self._thread = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._frames = None
+        self._timestamp = 0.0
+        self._error = None
+
+    def _decode_frame(self, frame):
+        if (
+            frame is None
+            or frame.ndim != 3
+            or frame.shape != (self.raw_height, self.raw_width, 3)
+        ):
+            shape = None if frame is None else frame.shape
+            raise RuntimeError(
+                f"Expected stereo frame "
+                f"{self.raw_width}x{self.raw_height}x3, got {shape}"
+            )
+        midpoint = self.raw_width // 2
+        result = {}
+        for name, eye in zip(
+            STEREO_CAMERA_NAMES,
+            (frame[:, :midpoint], frame[:, midpoint:]),
+        ):
+            if (
+                eye.shape[1] != self.output_width
+                or eye.shape[0] != self.output_height
+            ):
+                eye = cv2.resize(
+                    eye,
+                    (self.output_width, self.output_height),
+                    interpolation=cv2.INTER_AREA,
+                )
+            result[name] = cv2.cvtColor(eye, cv2.COLOR_BGR2RGB)
+        return result
+
+    def start(self, timeout):
+        if self._thread is not None:
+            return
+        if not self.device.exists():
+            raise FileNotFoundError(
+                f"Stereo camera device does not exist: {self.device}"
+            )
+        capture = cv2.VideoCapture(str(self.device), cv2.CAP_V4L2)
+        if not capture.isOpened():
+            capture.release()
+            raise RuntimeError(f"Cannot open stereo camera: {self.device}")
+        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.raw_width)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.raw_height)
+        capture.set(cv2.CAP_PROP_FPS, self.fps)
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self._capture = capture
+        self._stop.clear()
+        with self._lock:
+            self._frames = None
+            self._timestamp = 0.0
+            self._error = None
+        self._thread = threading.Thread(
+            target=self._reader,
+            name="stereo-rgb-camera",
+            daemon=True,
+        )
+        self._thread.start()
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                ready = self._frames is not None
+                error = self._error
+            if ready:
+                return
+            if error is not None:
+                self.stop()
+                raise RuntimeError(error)
+            time.sleep(0.01)
+        self.stop()
+        raise TimeoutError(
+            f"No frame from stereo camera within {timeout:.1f}s"
+        )
+
+    def _reader(self):
+        consecutive_failures = 0
+        try:
+            while not self._stop.is_set():
+                ok, frame = self._capture.read()
+                if not ok or frame is None:
+                    consecutive_failures += 1
+                    if consecutive_failures >= 10:
+                        raise RuntimeError("Stereo camera stopped delivering frames")
+                    time.sleep(0.01)
+                    continue
+                consecutive_failures = 0
+                frames = self._decode_frame(frame)
+                with self._lock:
+                    self._frames = frames
+                    self._timestamp = time.monotonic()
+        except Exception as exc:
+            with self._lock:
+                self._error = f"{type(exc).__name__}: {exc}"
+
+    def latest(self, max_age):
+        with self._lock:
+            error = self._error
+            frames = self._frames
+            timestamp = self._timestamp
+        if error is not None:
+            raise RuntimeError(error)
+        if frames is None:
+            raise RuntimeError("Stereo camera has no frame")
+        age = time.monotonic() - timestamp
+        if age > max_age:
+            raise RuntimeError(f"Stereo camera frame is stale by {age:.3f}s")
+        return {
+            name: frame.copy()
+            for name, frame in frames.items()
+        }, timestamp
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        if self._capture is not None:
+            self._capture.release()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        self._thread = None
+        self._capture = None
+
+
+def _letterbox_rgb(frame, output):
+    """Copy one RGB frame into an RGB output buffer without distortion."""
+    frame = np.asarray(frame)
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        raise ValueError(f"Expected HxWx3 RGB frame, got {frame.shape}")
+    if output.ndim != 3 or output.shape[2] != 3:
+        raise ValueError(f"Expected HxWx3 RGB output, got {output.shape}")
+
+    input_height, input_width = frame.shape[:2]
+    output_height, output_width = output.shape[:2]
+    if min(input_height, input_width, output_height, output_width) <= 0:
+        raise ValueError("RGB frame and output dimensions must be positive")
+
+    scale = min(
+        output_width / input_width,
+        output_height / input_height,
+    )
+    width = max(1, min(output_width, int(round(input_width * scale))))
+    height = max(1, min(output_height, int(round(input_height * scale))))
+    interpolation = (
+        cv2.INTER_AREA
+        if scale < 1.0
+        else cv2.INTER_LINEAR
+    )
+    resized = cv2.resize(frame, (width, height), interpolation=interpolation)
+    x_offset = (output_width - width) // 2
+    y_offset = (output_height - height) // 2
+    output.fill(0)
+    output[
+        y_offset:y_offset + height,
+        x_offset:x_offset + width,
+    ] = resized
 
 
 def _jsonable_config(args):
@@ -63,10 +273,41 @@ def _jsonable_config(args):
     }
 
 
+def _future_qpos(qpos, timestamps, delay):
+    """Sample the observed joint trajectory at t + delay."""
+    qpos = np.asarray(qpos, dtype=np.float32)
+    timestamps = np.asarray(timestamps, dtype=np.float64)
+    if delay <= 0.0:
+        raise ValueError("Future qpos delay must be positive")
+    if qpos.ndim != 2 or timestamps.shape != (len(qpos),):
+        raise ValueError("Qpos and record timestamps must have equal lengths")
+    if len(qpos) == 1:
+        return qpos.copy()
+    if np.any(np.diff(timestamps) <= 0.0):
+        raise ValueError("Record timestamps must be strictly increasing")
+    future_times = timestamps + delay
+    return np.column_stack(
+        [
+            np.interp(future_times, timestamps, qpos[:, joint])
+            for joint in range(qpos.shape[1])
+        ]
+    ).astype(np.float32)
+
+
 def _write_episode_file(path, buffers, outcome):
     t_actual = len(buffers["action"])
     if t_actual == 0:
         raise ValueError("Cannot save an empty episode")
+
+    requested_action = np.asarray(buffers["action"], dtype=np.float32)
+    sent_action = np.asarray(buffers["sent_action"], dtype=np.float32)
+    qpos = np.asarray(buffers["qpos"], dtype=np.float32)
+    qvel = np.asarray(buffers["qvel"], dtype=np.float32)
+    future_qpos = _future_qpos(
+        qpos,
+        buffers["timestamps"]["record"],
+        buffers["future_qpos_delay"],
+    )
 
     with h5py.File(path, "w", rdcc_nbytes=2 * 1024**2) as root:
         root.attrs["sim"] = False
@@ -74,7 +315,41 @@ def _write_episode_file(path, buffers, outcome):
         root.attrs["outcome"] = outcome
         root.attrs["control_source"] = "vr_left_hand"
         root.attrs["joint_observation_source"] = "dm_motor_can_feedback"
-        root.attrs["image_source"] = "mujoco_renderer"
+        root.attrs["image_source"] = buffers["image_source"]
+        root.attrs["camera_names"] = tuple(buffers["camera_names"])
+        root.attrs["camera_device"] = buffers["camera_device"]
+        root.attrs["camera_layout"] = "side_by_side_left_right"
+        root.attrs["camera_color_order"] = "RGB"
+        root.attrs["camera_raw_resolution"] = np.asarray(
+            buffers["camera_raw_resolution"], dtype=np.int32
+        )
+        root.attrs["camera_output_resolution"] = np.asarray(
+            buffers["camera_output_resolution"], dtype=np.int32
+        )
+        root.attrs["act_schema"] = "bimanual_joint_position_v1"
+        root.attrs["joint_names"] = ACT_JOINT_NAMES
+        root.attrs["joint_order"] = "left_arm,left_gripper,right_arm,right_gripper"
+        root.attrs["active_arm_mask"] = ACTIVE_ARM_MASK
+        root.attrs["controlled_arms"] = "left"
+        root.attrs["inactive_arm_fill"] = "fixed_home_pose"
+        root.attrs["gripper_normalization"] = "closed=0.0,open=1.0"
+        root.attrs["action_type"] = "absolute_joint_position"
+        root.attrs["action_source"] = "future_qpos"
+        root.attrs["action_before_smoothing"] = False
+        root.attrs["requested_action_before_smoothing"] = True
+        root.attrs["future_qpos_delay_sec"] = buffers["future_qpos_delay"]
+        root.attrs["future_qpos_tail_fill"] = "repeat_last_observation"
+        root.attrs["outcome_source"] = buffers.get(
+            "outcome_source", "unspecified"
+        )
+        root.attrs["gravity_compensation_source"] = "mujoco_static_bias"
+        root.attrs["gravity_compensation_scale"] = buffers[
+            "gravity_compensation_scale"
+        ]
+        root.attrs["gravity_feedforward_torque_limit"] = np.asarray(
+            umc.MAX_FEEDFORWARD_TORQUE,
+            dtype=np.float32,
+        )
         root.attrs["initial_object_pose"] = np.asarray(
             buffers["initial_object_pose"], dtype=np.float32
         )
@@ -121,25 +396,31 @@ def _write_episode_file(path, buffers, outcome):
                 dataset[frame_index] = frame
 
         observations.create_dataset(
-            "qpos", (sim_collector.MAX_TIMESTEPS, 14), dtype="float32"
+            "qpos",
+            (sim_collector.MAX_TIMESTEPS, ACT_STATE_DIM),
+            dtype="float32",
         )
         observations.create_dataset(
-            "qvel", (sim_collector.MAX_TIMESTEPS, 14), dtype="float32"
+            "qvel",
+            (sim_collector.MAX_TIMESTEPS, ACT_STATE_DIM),
+            dtype="float32",
         )
-        root.create_dataset(
-            "action", (sim_collector.MAX_TIMESTEPS, 14), dtype="float32"
-        )
-        root["/action"][:t_actual] = np.asarray(
-            buffers["action"], dtype=np.float32
-        )
-        root["/observations/qpos"][:t_actual] = np.asarray(
-            buffers["qpos"], dtype=np.float32
-        )
-        root["/observations/qvel"][:t_actual] = np.asarray(
-            buffers["qvel"], dtype=np.float32
-        )
+        for name, values in (
+            ("requested_action", requested_action),
+            ("sent_action", sent_action),
+            ("future_qpos", future_qpos),
+        ):
+            dataset = root.create_dataset(
+                name,
+                (sim_collector.MAX_TIMESTEPS, ACT_STATE_DIM),
+                dtype="float32",
+            )
+            dataset[:t_actual] = values
+            dataset[t_actual:] = values[-1]
+        root["action"] = root["future_qpos"]
+        root["/observations/qpos"][:t_actual] = qpos
+        root["/observations/qvel"][:t_actual] = qvel
         for key, last in (
-            ("/action", buffers["action"][-1]),
             ("/observations/qpos", buffers["qpos"][-1]),
             ("/observations/qvel", buffers["qvel"][-1]),
         ):
@@ -202,6 +483,7 @@ class RealCollector(sim_collector.Collector):
 
     DISARMED = "DISARMED"
     ARMED = "ARMED_UNCALIBRATED"
+    HOME_REQUIRED = "HOME_REQUIRED"
     CALIBRATING = "CALIBRATING"
     READY_MODE = "READY"
     RECORDING = "RECORDING"
@@ -219,7 +501,25 @@ class RealCollector(sim_collector.Collector):
         self.latest_can_timestamp = 0.0
 
         super().__init__(args)
+        self.home_g = sim_collector.LEFT_HOME_GRIPPER
 
+        self.gravity_data = mujoco.MjData(self.m)
+        self.latest_gravity_feedforward_raw = np.zeros(
+            umc.ARM_DOF, dtype=np.float64
+        )
+        self.latest_gravity_feedforward_command = np.zeros(
+            umc.NUM_MOTORS, dtype=np.float64
+        )
+        self.latest_control_dt = 0.0
+        self.stereo_camera = StereoRGBCamera(
+            args.camera_device,
+            raw_width=args.camera_raw_width,
+            raw_height=args.camera_raw_height,
+            output_width=args.camera_output_width,
+            output_height=args.camera_output_height,
+            fps=args.camera_fps,
+        )
+        self.last_recorded_camera_timestamp = None
         self.output_dir = Path(args.output_dir).expanduser().resolve()
         self.diagnostic_dir = (
             Path(args.diagnostic_dir).expanduser().resolve()
@@ -252,6 +552,11 @@ class RealCollector(sim_collector.Collector):
             "kp": args.kp,
             "kd": args.kd,
             "motor_smoothing": args.motor_smoothing,
+            # HardwareMotorBridge converts max_step back to a time-based
+            # speed. Supplying speed/frequency gives this collector an
+            # explicit responsive profile without altering shared defaults.
+            "max_step": np.asarray(args.motor_max_speed, dtype=np.float64)
+            / float(umc.MOTOR_CTRL_FREQ),
             "device_sn": args.device_sn,
             "enable_gripper": not args.disable_gripper,
             "calibration_record": args.calibration_record,
@@ -261,6 +566,11 @@ class RealCollector(sim_collector.Collector):
             bridge_args = {
                 "enable_gripper": not args.disable_gripper,
                 "control_frequency": args.motor_freq or umc.MOTOR_CTRL_FREQ,
+                "max_speed": float(max(args.motor_max_speed)),
+                "feedforward_torque_limit": umc.MAX_FEEDFORWARD_TORQUE,
+                "feedforward_torque_slew": (
+                    umc.MAX_FEEDFORWARD_TORQUE_SLEW
+                ),
             }
         self.hardware_bridge = bridge_type(**bridge_args)
 
@@ -277,7 +587,10 @@ class RealCollector(sim_collector.Collector):
         self.tracking_valid = False
         self.tracking_loss_since = None
         self.latest_left_hand = None
+        self.hand_filter_input = None
+        self.hand_filter_output = None
         self.tracking_error_since = None
+        self.home_stable_since = None
         self.return_stable_since = None
         self.scene_stable_since = time.monotonic()
         self.target_position_error = 0.0
@@ -286,6 +599,7 @@ class RealCollector(sim_collector.Collector):
         self.target_clamp_active = False
         self.targets_complete_after_return = False
         self.exit_after_return = False
+        self.auto_home_return = False
         self.run_config = _jsonable_config(args)
         self.episode_stats = None
         self.control_disabled_since = None
@@ -305,12 +619,26 @@ class RealCollector(sim_collector.Collector):
         )
         if args.dry_run:
             print("[dry-run] No CAN device or real motor will be used")
+        print(
+            "[control] responsive profile: "
+            f"motor_max_speed={list(args.motor_max_speed)}, "
+            f"lookahead={args.command_lookahead:.3f}s, "
+            f"max_lead={args.max_command_lead_deg:.1f}deg, "
+            f"smoothing_tau={args.command_smoothing_tau:.3f}s"
+        )
 
     def _motor_gripper_target(self):
         if self.a.disable_gripper:
             return 0.0
         normalized = np.clip(self.g / sim_collector.GRIPPER_OPEN, 0.0, 1.0)
         return float(normalized * self.a.gripper_motor_open_pos)
+
+    def update_gripper(self, _dt, pinch_distance):
+        if pinch_distance is not None:
+            self.g = float(
+                np.clip(pinch_distance / self.a.gripper_open_distance, 0.0, 1.0)
+                * sim_collector.GRIPPER_OPEN
+            )
 
     def _normalized_gripper_feedback(self, position):
         if self.a.disable_gripper:
@@ -433,7 +761,6 @@ class RealCollector(sim_collector.Collector):
                 self._normalized_gripper_velocity(velocities[umc.ARM_DOF])
                 * sim_collector.GRIPPER_OPEN
             )
-            self.g = gripper
 
         mujoco.mj_forward(self.m, self.d)
 
@@ -449,6 +776,8 @@ class RealCollector(sim_collector.Collector):
         self.calibrate_at = None
         self.motion_active = False
         self.needs_rebase = False
+        self.home_stable_since = None
+        self.return_stable_since = None
         self.controls(force=True)
 
     def _prepare_bridge_rearm(self):
@@ -490,12 +819,41 @@ class RealCollector(sim_collector.Collector):
 
         self.hardware_armed = True
         self.hardware_estopped = False
-        self.mode = self.ARMED
-        print("[motor] Armed at current pose; press P to calibrate VR")
+        self.g = self.home_g
+        self.mode = self.HOME_REQUIRED
+        print(
+            f"[motor] Gravity compensation scale="
+            f"{self.a.gravity_compensation_scale:.2f}; "
+            f"limits={umc.MAX_FEEDFORWARD_TORQUE[:umc.ARM_DOF]} Nm"
+        )
+        print(
+            "[home] Loaded left-arm startup pose from "
+            f"{sim_collector.HOME_POSE_FILE}: "
+            + np.array2string(self.home_q, precision=3)
+            + " rad"
+        )
+        print(
+            "[home] Moving to the startup pose automatically; "
+            "press E for emergency stop"
+        )
 
     def calibrate(self):
         if not self.hardware_armed:
             print("[calib] Press A first")
+            return
+        if self.mode == self.HOME_REQUIRED:
+            error_deg = np.rad2deg(
+                self.latest_motor_q[:umc.ARM_DOF] - self.home_q
+            )
+            print(
+                "[calib] Wait for automatic Home positioning to finish; "
+                "feedback="
+                + np.array2string(self.latest_motor_q[:umc.ARM_DOF], precision=3)
+                + ", target="
+                + np.array2string(self.home_q, precision=3)
+                + ", error_deg="
+                + np.array2string(error_deg, precision=1)
+            )
             return
         if self.mode not in (self.ARMED, self.READY_MODE):
             print(f"[calib] P is unavailable in state {self.mode}")
@@ -526,6 +884,7 @@ class RealCollector(sim_collector.Collector):
             self.calibration_q = self.latest_motor_q[:umc.ARM_DOF].copy()
             self.calibration_hand_pose = self.hand_ref.copy()
             self.calibration_tcp_pose = self.eref.copy()
+            self._reset_hand_filter(self.hand_ref)
             self.command_q = self.calibration_q.copy()
             self.mode = self.READY_MODE
             self.scene_stable_since = None
@@ -541,6 +900,7 @@ class RealCollector(sim_collector.Collector):
         self._mirror_model_from_hardware()
         hand_current = self.robotbase_vuer @ left_hand
         hand_current[:3, :3] = sim_collector.rot(hand_current[:3, :3])
+        self._reset_hand_filter(hand_current)
         tcp_position, tcp_rotation = sim_collector.site_pose(self.d, self.tcp)
         self.hand_ref = hand_current.copy()
         self.eref = self.robotbase_world @ sim_collector.pose(
@@ -555,29 +915,194 @@ class RealCollector(sim_collector.Collector):
         print("[control] Reference rebased at held TCP pose")
         return True
 
+    def _reset_hand_filter(self, hand_pose=None):
+        self.hand_filter_input = None if hand_pose is None else hand_pose.copy()
+        self.hand_filter_output = None if hand_pose is None else hand_pose.copy()
+
+    def _filter_hand_pose(self, hand_pose, dt):
+        if self.hand_filter_output is None:
+            self._reset_hand_filter(hand_pose)
+            return hand_pose.copy()
+
+        accepted = self.hand_filter_input.copy()
+        if np.linalg.norm(hand_pose[:3, 3] - accepted[:3, 3]) >= (
+            self.a.vr_position_deadband
+        ):
+            accepted[:3, 3] = hand_pose[:3, 3]
+        rotation_delta = sim_collector.rotvec(
+            hand_pose[:3, :3] @ accepted[:3, :3].T
+        )
+        if np.linalg.norm(rotation_delta) >= np.deg2rad(
+            self.a.vr_rotation_deadband_deg
+        ):
+            accepted[:3, :3] = hand_pose[:3, :3]
+        self.hand_filter_input = accepted
+
+        filtered = self.hand_filter_output.copy()
+        position_alpha = 1.0 - np.exp(
+            -2.0 * np.pi * self.a.vr_position_filter_hz * dt
+        )
+        filtered[:3, 3] += position_alpha * (
+            accepted[:3, 3] - filtered[:3, 3]
+        )
+        rotation_delta = sim_collector.rotvec(
+            accepted[:3, :3] @ filtered[:3, :3].T
+        )
+        rotation_alpha = 1.0 - np.exp(
+            -2.0 * np.pi * self.a.vr_rotation_filter_hz * dt
+        )
+        filtered[:3, :3] = sim_collector.rot(
+            sim_collector.rotation_from_rotvec(
+                rotation_alpha * rotation_delta
+            )
+            @ filtered[:3, :3]
+        )
+        self.hand_filter_output = filtered
+        return filtered.copy()
+
     def _freeze_motion_target(self):
         if not self.hardware_armed:
             return
-        sent = self._sent_motor_target()
-        self.command_q = sent[:umc.ARM_DOF].copy()
-        self.hardware_bridge.set_target(sent)
+        # Holding the last sent target lets queued motion continue after I is
+        # released. Hold fresh measured position to cancel remaining lead.
+        hold = self.latest_motor_q.copy()
+        self.q = hold[:umc.ARM_DOF].copy()
+        self.command_q = self.q.copy()
+        self.last_q_velocity = np.zeros(umc.ARM_DOF, dtype=np.float64)
+        self.hardware_bridge.set_target(
+            hold,
+            feedforward_torque=self._gravity_feedforward(),
+        )
         self.motion_active = False
         self.needs_rebase = bool(self.cal)
 
+    def _return_home_before_shutdown(self):
+        """Return the armed arm to Home before the normal cleanup disables it."""
+        self._read_hardware_feedback()
+        start_q = self.latest_motor_q[:umc.ARM_DOF].copy()
+        gripper_q = float(self.latest_motor_q[umc.ARM_DOF])
+        duration = trajectory_duration(
+            start_q - ZERO_POSE,
+            self.a.ctrl_c_return_speed,
+        )
+        steps = max(1, int(np.ceil(duration * CTRL_C_RETURN_RATE_HZ)))
+        period = 1.0 / CTRL_C_RETURN_RATE_HZ
+        zero_torque = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
+        print(
+            "[return] Ctrl-C received; returning to ZERO_POSE at "
+            f"<={self.a.ctrl_c_return_speed:.3f} rad/s before disabling. "
+            "Press E or Ctrl-C again to disable immediately."
+        )
+
+        for step in range(1, steps + 1):
+            if self.keyboard is None or not self.keyboard.healthy:
+                raise RuntimeError("Keyboard safety input failed during return")
+            if self.keyboard.is_pressed("e"):
+                raise RuntimeError("E-stop pressed during return")
+            fraction = minimum_jerk_fraction(step * period, duration)
+            arm_target = start_q + (ZERO_POSE - start_q) * fraction
+            self.hardware_bridge.set_target(
+                np.r_[arm_target, gripper_q],
+                feedforward_torque=zero_torque,
+            )
+            time.sleep(period)
+            self._read_hardware_feedback()
+
+        stable_samples = 0
+        required_samples = max(
+            1,
+            int(np.ceil(self.a.return_settle_time * CTRL_C_RETURN_RATE_HZ)),
+        )
+        max_samples = int(
+            CTRL_C_RETURN_SETTLE_TIMEOUT_SEC * CTRL_C_RETURN_RATE_HZ
+        )
+        final_target = np.r_[ZERO_POSE, gripper_q]
+        for _ in range(max_samples):
+            if self.keyboard is None or not self.keyboard.healthy:
+                raise RuntimeError("Keyboard safety input failed during return")
+            if self.keyboard.is_pressed("e"):
+                raise RuntimeError("E-stop pressed during return")
+            self.hardware_bridge.set_target(
+                final_target,
+                feedforward_torque=zero_torque,
+            )
+            time.sleep(period)
+            self._read_hardware_feedback()
+            settled = (
+                np.all(
+                    np.abs(
+                        self.latest_motor_q[:umc.ARM_DOF] - ZERO_POSE
+                    )
+                    <= np.deg2rad(self.a.return_tolerance_deg)
+                )
+                and np.all(
+                    np.abs(self.latest_motor_dq[:umc.ARM_DOF])
+                    <= self.a.return_velocity_tolerance
+                )
+            )
+            stable_samples = stable_samples + 1 if settled else 0
+            if stable_samples >= required_samples:
+                print("[return] ZERO_POSE reached and stable; disabling motors")
+                return
+        raise TimeoutError("Arm did not settle at ZERO_POSE within 5 seconds")
+
+    def _gravity_feedforward(self):
+        if self.a.gravity_compensation_scale <= 0.0:
+            self.latest_gravity_feedforward_raw[:] = 0.0
+            self.latest_gravity_feedforward_command[:] = 0.0
+            return self.latest_gravity_feedforward_command.copy()
+
+        self.gravity_data.qpos[:] = self.d.qpos
+        self.gravity_data.qvel[:] = 0.0
+        self.gravity_data.qacc[:] = 0.0
+        mujoco.mj_forward(self.m, self.gravity_data)
+        raw = (
+            self.gravity_data.qfrc_bias[self.lv]
+            - self.gravity_data.qfrc_passive[self.lv]
+        )
+        if not np.isfinite(raw).all():
+            raise RuntimeError("Non-finite MuJoCo gravity compensation torque")
+
+        limits = np.asarray(
+            umc.MAX_FEEDFORWARD_TORQUE[:umc.ARM_DOF],
+            dtype=np.float64,
+        )
+        command = np.clip(
+            self.a.gravity_compensation_scale * raw,
+            -limits,
+            limits,
+        )
+        self.latest_gravity_feedforward_raw[:] = raw
+        self.latest_gravity_feedforward_command[:] = np.r_[command, 0.0]
+        return self.latest_gravity_feedforward_command.copy()
+
     def _send_smoothed_target(self, desired_q, dt):
         alpha = 1.0 - np.exp(-dt / self.a.command_smoothing_tau)
-        self.command_q += alpha * (np.asarray(desired_q) - self.command_q)
-        lower = self.left_limits[:, 0] + self.a.joint_limit_margin
-        upper = self.left_limits[:, 1] - self.a.joint_limit_margin
+        desired_q = np.asarray(desired_q, dtype=np.float64)
+        static_lower = self.left_limits[:, 0] + self.a.joint_limit_margin
+        static_upper = self.left_limits[:, 1] - self.a.joint_limit_margin
+        lead = np.deg2rad(self.a.max_command_lead_deg)
+        actual = self.latest_motor_q[:umc.ARM_DOF]
+        lower = np.maximum(static_lower, actual - lead)
+        upper = np.minimum(static_upper, actual + lead)
+        desired_q = np.clip(desired_q, lower, upper)
+        self.command_q += alpha * (desired_q - self.command_q)
         self.command_q = np.clip(self.command_q, lower, upper)
         target = np.append(self.command_q, self._motor_gripper_target())
-        self.hardware_bridge.set_target(target)
+        self.hardware_bridge.set_target(
+            target,
+            feedforward_torque=self._gravity_feedforward(),
+        )
         self.last_action_timestamp = time.monotonic()
         self.motion_active = True
 
     def incremental_ik(self, target_p_base, target_r_base, dt):
-        q_actual = self.d.qpos[self.lq].copy()
-        self.d.qpos[self.lq] = self.q
+        # Linearize at measured CAN position and request only a short-horizon
+        # target. Integrating from self.q lets a rate-limited motor build a
+        # seconds-long backlog that is slow to unwind after hand reversal.
+        q_model = self.d.qpos[self.lq].copy()
+        q_actual = self.latest_motor_q[:umc.ARM_DOF].copy()
+        self.d.qpos[self.lq] = q_actual
         mujoco.mj_forward(self.m, self.d)
         current_p, current_r = sim_collector.site_pose(self.d, self.tcp)
         target_p = (
@@ -606,7 +1131,7 @@ class RealCollector(sim_collector.Collector):
                 orientation_weight * jacobian_rotation[:, self.lv],
             )
         )
-        self.d.qpos[self.lq] = q_actual
+        self.d.qpos[self.lq] = q_model
         mujoco.mj_forward(self.m, self.d)
 
         linear_velocity = sim_collector.clip_norm(
@@ -622,22 +1147,42 @@ class RealCollector(sim_collector.Collector):
         ]
         speed_limit = np.full(umc.ARM_DOF, self.a.joint_max_speed)
         acceleration_limit = self.a.joint_max_acceleration * dt
+        horizon = max(float(dt), self.a.command_lookahead)
         lower_limit = self.left_limits[:, 0] + self.a.joint_limit_margin
         upper_limit = self.left_limits[:, 1] - self.a.joint_limit_margin
         lower = np.maximum.reduce(
             (
                 -speed_limit,
                 self.last_q_velocity - acceleration_limit,
-                (lower_limit - self.q) / dt,
+                (lower_limit - q_actual) / horizon,
             )
         )
         upper = np.minimum.reduce(
             (
                 speed_limit,
                 self.last_q_velocity + acceleration_limit,
-                (upper_limit - self.q) / dt,
+                (upper_limit - q_actual) / horizon,
             )
         )
+        infeasible = lower > upper
+        if np.any(infeasible):
+            # Close to a joint limit, safe braking can conflict with the
+            # nominal acceleration bound. Position safety takes precedence.
+            position_lower = np.maximum(
+                -speed_limit,
+                (lower_limit - q_actual) / horizon,
+            )
+            position_upper = np.minimum(
+                speed_limit,
+                (upper_limit - q_actual) / horizon,
+            )
+            safe_velocity = np.clip(
+                np.zeros_like(lower),
+                position_lower,
+                position_upper,
+            )
+            lower[infeasible] = safe_velocity[infeasible]
+            upper[infeasible] = safe_velocity[infeasible]
         dq = sim_collector.bounded_weighted_dls(
             jacobian,
             requested_velocity,
@@ -645,10 +1190,18 @@ class RealCollector(sim_collector.Collector):
             self.a.ik_damping,
             lower,
             upper,
+            np.clip(
+                self.a.ik_posture_gain * (self.calibration_q - q_actual),
+                -speed_limit,
+                speed_limit,
+            ),
         )
-        previous_q = self.q.copy()
-        self.q = np.clip(previous_q + dq * dt, lower_limit, upper_limit)
-        self.last_q_velocity = (self.q - previous_q) / dt
+        requested_q = q_actual + dq * horizon
+        lead = np.deg2rad(self.a.max_command_lead_deg)
+        dynamic_lower = np.maximum(lower_limit, q_actual - lead)
+        dynamic_upper = np.minimum(upper_limit, q_actual + lead)
+        self.q = np.clip(requested_q, dynamic_lower, dynamic_upper)
+        self.last_q_velocity = dq
         near_limit = np.any(
             (self.q - lower_limit < 1e-4) | (upper_limit - self.q < 1e-4)
         )
@@ -656,14 +1209,51 @@ class RealCollector(sim_collector.Collector):
         self.target_clamped = bool(near_limit or stalled)
         return True
 
-    def teleop(self, left_hand):
+    def teleop(self, left_hand, dt):
         if not self.cal or not self.tracking_valid:
             return
-        super().teleop(left_hand)
+        dt = float(np.clip(dt, 1e-4, 0.1))
+        now = time.monotonic()
+        self.last_teleop = now
+        self.update_gripper(dt, self.current_hand_geometry())
+        left_hand = sim_collector.rigid_pose(left_hand)
+        if left_hand is None:
+            return
+        hand_current = self.robotbase_vuer @ left_hand
+        hand_current[:3, :3] = sim_collector.rot(hand_current[:3, :3])
+        hand_current = self._filter_hand_pose(hand_current, dt)
+        target_p, target_r = sim_collector.target_pose_from_hand(
+            hand_current,
+            self.hand_ref,
+            self.eref,
+            self.a.position_scale,
+        )
+        self.incremental_ik(target_p, target_r, dt)
+
+        if self.a.teleop_debug and now - self.teleop_log >= 0.5:
+            self.teleop_log = now
+            sent = self._sent_motor_target()[:umc.ARM_DOF]
+            lead_deg = np.rad2deg(
+                np.max(np.abs(sent - self.latest_motor_q[:umc.ARM_DOF]))
+            )
+            print(
+                "[teleop] hand_delta="
+                + np.array2string(
+                    hand_current[:3, 3] - self.hand_ref[:3, 3],
+                    precision=3,
+                    formatter={"float": lambda value: f"{value:+.3f}"},
+                )
+                + f" tcp_err={self.target_position_error:.3f}m"
+                + f" ori_err={np.rad2deg(self.target_rotation_error):.1f}deg"
+                + f" cmd_lead={lead_deg:.1f}deg"
+                + " dq="
+                + np.array2string(self.last_q_velocity, precision=2)
+            )
 
     def _control_tick(self, left_hand, now, dt):
         if not self.hardware_armed or self.mode == self.FAULT:
             return
+        self.latest_control_dt = float(dt)
 
         enable = self.keyboard.is_pressed("i")
         returning = self.keyboard.is_pressed("r")
@@ -674,15 +1264,33 @@ class RealCollector(sim_collector.Collector):
                 self._freeze_motion_target()
                 return
 
+        if self.mode == self.HOME_REQUIRED:
+            self.q = self.home_q.copy()
+            self._send_smoothed_target(self.home_q, dt)
+            self._update_home_completion(now)
+            return
+
         if self.mode == self.RETURN_REQUIRED:
-            if enable and returning:
-                self.q = self.calibration_q.copy()
-                self._send_smoothed_target(self.calibration_q, dt)
+            target = self.home_q if self.auto_home_return else self.calibration_q
+            if self.auto_home_return or (enable and returning):
+                if self.auto_home_return:
+                    self.g = self.home_g
+                self.q = target.copy()
+                self._send_smoothed_target(target, dt)
                 self._update_return_completion(now)
             else:
                 if self.motion_active:
                     self._freeze_motion_target()
                 self.return_stable_since = None
+            return
+
+        if self.mode == self.ARMED:
+            opening = self.keyboard.is_pressed("u")
+            closing = self.keyboard.is_pressed("d")
+            if not self.a.disable_gripper and opening != closing:
+                self.g = sim_collector.GRIPPER_OPEN if opening else 0.0
+            self.q = self.home_q.copy()
+            self._send_smoothed_target(self.home_q, dt)
             return
 
         requested = (
@@ -700,17 +1308,44 @@ class RealCollector(sim_collector.Collector):
         if self.needs_rebase and not self._rebase_control(left_hand):
             self._freeze_motion_target()
             return
-        self.teleop(left_hand)
+        self.teleop(left_hand, dt)
         self._send_smoothed_target(self.q, dt)
 
+    def _update_home_completion(self, now):
+        error = np.abs(self.latest_motor_q[:umc.ARM_DOF] - self.home_q)
+        settled = np.all(error <= np.deg2rad(self.a.return_tolerance_deg))
+        if not settled:
+            self.home_stable_since = None
+            return
+        if self.home_stable_since is None:
+            self.home_stable_since = now
+            return
+        if now - self.home_stable_since < self.a.return_settle_time:
+            return
+
+        self._freeze_motion_target()
+        self.mode = self.ARMED
+        self.state = self.READY
+        self.require_enable_release = False
+        self.needs_rebase = False
+        self.home_stable_since = None
+        print(
+            "[home] Startup pose reached. Press P to calibrate VR; "
+            "before P, hold U/D to open/close the gripper"
+        )
+
     def _update_return_completion(self, now):
+        target = self.home_q if self.auto_home_return else self.calibration_q
         error = np.abs(
-            self.latest_motor_q[:umc.ARM_DOF] - self.calibration_q
+            self.latest_motor_q[:umc.ARM_DOF] - target
         )
         velocity = np.abs(self.latest_motor_dq[:umc.ARM_DOF])
         settled = (
             np.all(error <= np.deg2rad(self.a.return_tolerance_deg))
-            and np.all(velocity <= self.a.return_velocity_tolerance)
+            and (
+                self.auto_home_return
+                or np.all(velocity <= self.a.return_velocity_tolerance)
+            )
         )
         if not settled:
             self.return_stable_since = None
@@ -721,14 +1356,27 @@ class RealCollector(sim_collector.Collector):
         if now - self.return_stable_since < self.a.return_settle_time:
             return
 
+        automatic_home = self.auto_home_return
         self._freeze_motion_target()
         self._reset_virtual_scene()
-        self.mode = self.READY_MODE
         self.state = self.READY
-        self.require_enable_release = True
-        self.needs_rebase = True
         self.return_stable_since = None
-        print("[return] Calibration pose reached; release I before continuing")
+        self.auto_home_return = False
+        if automatic_home:
+            self.cal = False
+            self.calibrate_at = None
+            self.calibration_q = None
+            self.calibration_hand_pose = None
+            self.calibration_tcp_pose = None
+            self.mode = self.ARMED
+            self.require_enable_release = False
+            self.needs_rebase = False
+            print("[return] Home pose reached. Press P to calibrate VR")
+        else:
+            self.mode = self.READY_MODE
+            self.require_enable_release = True
+            self.needs_rebase = True
+            print("[return] Calibration pose reached; release I before continuing")
         if self.targets_complete_after_return:
             self.exit_after_return = True
 
@@ -754,9 +1402,11 @@ class RealCollector(sim_collector.Collector):
                 self.d.qpos[qpos_address] = self.home_q[index]
             self.q = self.home_q.copy()
             self.command_q = self.q.copy()
-        for qpos_address in self.lf + self.rf:
+        for qpos_address in self.lf:
+            self.d.qpos[qpos_address] = self.home_g
+        for qpos_address in self.rf:
             self.d.qpos[qpos_address] = sim_collector.GRIPPER_OPEN
-        self.g = sim_collector.GRIPPER_OPEN
+        self.g = self.home_g
         self.last_q_velocity[:] = 0.0
         self.grasp_since = None
         self.grasped = False
@@ -806,6 +1456,8 @@ class RealCollector(sim_collector.Collector):
         reasons = []
         if not self.hardware_armed:
             reasons.append("press A")
+        if self.mode == self.HOME_REQUIRED:
+            reasons.append("wait for automatic Home positioning")
         if not self.cal or self.mode != self.READY_MODE:
             reasons.append("press P / finish return")
         if not self.keyboard.is_pressed("i"):
@@ -816,8 +1468,10 @@ class RealCollector(sim_collector.Collector):
             reasons.append("restore VR hand tracking")
         if self.require_enable_release:
             reasons.append("release I once")
-        if not self._scene_ready(now):
-            reasons.append("wait for cup to settle")
+        try:
+            self.stereo_camera.latest(self.a.camera_timeout)
+        except RuntimeError as exc:
+            reasons.append(f"restore stereo camera ({exc})")
         if reasons:
             print("[record] Cannot start: " + "; ".join(reasons))
             return
@@ -831,12 +1485,28 @@ class RealCollector(sim_collector.Collector):
         self.episode_stats = self._new_episode_stats()
         self.control_disabled_since = None
         self.target_clamp_active = False
+        self.last_recorded_camera_timestamp = None
         self.buf = {
             "action": [],
+            "sent_action": [],
             "qpos": [],
             "qvel": [],
-            "images": {"vr_center": [], "wrist": []},
-            "camera_names": ["vr_center", "wrist"],
+            "future_qpos_delay": self.a.future_qpos_delay,
+            "images": {name: [] for name in STEREO_CAMERA_NAMES},
+            "camera_names": list(STEREO_CAMERA_NAMES),
+            "image_source": "spca2100_v4l2_stereo_rgb",
+            "camera_device": str(self.stereo_camera.device),
+            "camera_raw_resolution": [
+                self.stereo_camera.raw_height,
+                self.stereo_camera.raw_width,
+            ],
+            "camera_output_resolution": [
+                self.stereo_camera.output_height,
+                self.stereo_camera.output_width,
+            ],
+            "gravity_compensation_scale": (
+                self.a.gravity_compensation_scale
+            ),
             "initial_object_pose": self.d.qpos[self.cqa:self.cqa + 7].copy(),
             "initial_motor_position": self.latest_motor_q.copy(),
             "calibration_q": self.calibration_q.copy(),
@@ -852,13 +1522,20 @@ class RealCollector(sim_collector.Collector):
                 "vr_tracking_valid": [],
                 "target_clamped": [],
                 "tcp_residual": [],
+                "gravity_feedforward_raw": [],
+                "gravity_feedforward_command": [],
+                "gravity_feedforward_sent": [],
+                "motor_control_frequency_hz": [],
+                "motor_control_mean_dt": [],
+                "motor_control_max_dt": [],
+                "control_dt": [],
             },
             "timestamps": {
                 "record": [],
                 "can": [],
                 "action": [],
-                "vr_center": [],
-                "wrist": [],
+                "stereo_left": [],
+                "stereo_right": [],
             },
         }
         target = self.current_failure_target()
@@ -870,7 +1547,10 @@ class RealCollector(sim_collector.Collector):
                     "source_evaluation_outcome": target["outcome"],
                 }
             )
-        print("[record] START: CAN qpos/qvel + IK action + MuJoCo RGB")
+        print(
+            "[record] START: Y saves success and N discards failure; "
+            "either returns home automatically"
+        )
 
     def _close_episode_stats(self, now):
         if self.control_disabled_since is not None:
@@ -887,6 +1567,7 @@ class RealCollector(sim_collector.Collector):
 
     def _finish_success(self):
         now = time.monotonic()
+        self.buf["outcome_source"] = "operator_keyboard_y"
         self._close_episode_stats(now)
         save_real_episode(
             self.output_dir,
@@ -900,33 +1581,14 @@ class RealCollector(sim_collector.Collector):
         self.episode_stats = None
         self.state = self.PENDING
         self.mode = self.RETURN_REQUIRED
+        self.auto_home_return = True
         self._freeze_motion_target()
         if self.advance_failure_target():
             self.targets_complete_after_return = True
             print("[targets] All requested failure poses have been recorded")
-        print("[record] SUCCESS; hold I+R to return to calibration pose")
+        print("[record] SUCCESS; returning to home pose automatically")
 
-    def _finish_diagnostic(self, outcome):
-        now = time.monotonic()
-        self._close_episode_stats(now)
-        save_real_episode(
-            self.diagnostic_dir,
-            "failure",
-            self.failure_ep,
-            self.buf,
-            outcome,
-        )
-        self.failure_ep = next_contiguous_index(
-            self.diagnostic_dir, "failure"
-        )
-        self.buf = None
-        self.episode_stats = None
-        self.state = self.PENDING
-        self.mode = self.RETURN_REQUIRED
-        self._freeze_motion_target()
-        print(f"[record] {outcome}; diagnostic saved; hold I+R to return")
-
-    def _discard_episode(self, reason, require_return=True):
+    def _discard_episode(self, reason, require_return=True, auto_home=False):
         if self.mode == self.RECORDING:
             print(f"[record] Discarded current episode: {reason}")
         if self.hardware_armed:
@@ -937,7 +1599,11 @@ class RealCollector(sim_collector.Collector):
         self.state = self.PENDING if require_return else self.READY
         if require_return and self.hardware_armed and self.calibration_q is not None:
             self.mode = self.RETURN_REQUIRED
-            print("[return] Hold I+R to return to calibration pose")
+            self.auto_home_return = auto_home
+            if auto_home:
+                print("[return] Returning to home pose automatically")
+            else:
+                print("[return] Hold I+R to return to calibration pose")
         elif self.hardware_armed:
             self.mode = self.READY_MODE
 
@@ -955,6 +1621,9 @@ class RealCollector(sim_collector.Collector):
                 self._sent_motor_target().tolist()
                 if self.hardware_bridge is not None
                 else None
+            ),
+            "gravity_feedforward_command": (
+                self.latest_gravity_feedforward_command.tolist()
             ),
             "run_config": self.run_config,
         }
@@ -991,11 +1660,18 @@ class RealCollector(sim_collector.Collector):
         self.cal = False
         self.calibrate_at = None
         self.calibration_q = None
+        self._reset_hand_filter()
         self.motion_active = False
+        self.home_stable_since = None
+        self.return_stable_since = None
+        self.auto_home_return = False
         self.mode = self.FAULT
         self.state = self.READY
         print(f"[safety] FAULT {event_type}: {detail or ''}", file=sys.stderr)
-        print("[safety] Resolve the fault, release I/R, then press A and P")
+        print(
+            "[safety] Resolve the fault, release I/R, press A, "
+            "wait for automatic Home positioning, then press P"
+        )
 
     def _update_tracking(self, raw_left_hand, left_hand, now):
         update_time = float(getattr(self.tv, "left_hand_update_time", 0.0))
@@ -1028,6 +1704,7 @@ class RealCollector(sim_collector.Collector):
                 self.episode_stats["vr_loss_count"] += 1
             print("[vr] Left-hand tracking lost; target frozen")
         self.tracking_valid = False
+        self._reset_hand_filter()
         if self.motion_active:
             self._freeze_motion_target()
 
@@ -1046,6 +1723,12 @@ class RealCollector(sim_collector.Collector):
             if key == "e" and event == "down":
                 self._safety_fault("keyboard_estop")
                 continue
+            if key in ("u", "d") and event == "down" and self.mode == self.ARMED:
+                target = self.a.gripper_motor_open_pos if key == "u" else 0.0
+                print(
+                    f"[gripper] {key.upper()} -> gripper CAN 0x01 "
+                    f"target={target:+.2f}"
+                )
             if key != "i" or self.episode_stats is None:
                 continue
             if event == "up" and self.control_disabled_since is None:
@@ -1170,7 +1853,7 @@ class RealCollector(sim_collector.Collector):
         self._append_target_ghost(renderer.scene, self._target_ghost_points())
         return renderer.render().copy()
 
-    def render(self, head):
+    def _render_simulated_vr(self, head):
         direction = (
             np.eye(3)
             if not self.cal
@@ -1216,6 +1899,53 @@ class RealCollector(sim_collector.Collector):
                 f"nonzero={self.img.any(axis=2).mean() * 100:.1f}%"
             )
 
+    def render(self, head):
+        if self.a.vr_view == "sim":
+            self._render_simulated_vr(head)
+            return
+
+        try:
+            camera_frames, camera_timestamp = self.stereo_camera.latest(
+                self.a.camera_timeout
+            )
+        except RuntimeError as exc:
+            self.img.fill(0)
+            now = time.monotonic()
+            if self.hardware_armed and self.mode != self.FAULT:
+                self._safety_fault("stereo_camera_display_failed", exc)
+            elif (
+                now - getattr(self, "last_camera_display_error_log", 0.0)
+                >= 1.0
+            ):
+                self.last_camera_display_error_log = now
+                print(f"[camera] VR display unavailable: {exc}", file=sys.stderr)
+            return
+
+        camera_names = list(STEREO_CAMERA_NAMES)
+        if self.a.swap_vr_camera_eyes:
+            camera_names.reverse()
+        for name, output in zip(
+            camera_names,
+            (self.img[:, :640], self.img[:, 640:]),
+        ):
+            _letterbox_rgb(camera_frames[name], output)
+
+        if self.a.show_wrist:
+            wrist = self._render_camera("wrist", self.ren["wrist"])
+            cv2.imshow("Wrist RGB", cv2.cvtColor(wrist, cv2.COLOR_RGB2BGR))
+            cv2.waitKey(1)
+        if (
+            self.a.teleop_debug
+            and time.monotonic() - self.log > 5.0
+        ):
+            self.log = time.monotonic()
+            age_ms = (self.log - camera_timestamp) * 1e3
+            print(
+                f"[vr] source=real_stereo age={age_ms:.1f}ms "
+                f"frame max={self.img.max()} "
+                f"nonzero={self.img.any(axis=2).mean() * 100:.1f}%"
+            )
+
     def frame(self):
         if self.mode != self.RECORDING or self.t < self.next:
             return
@@ -1223,6 +1953,19 @@ class RealCollector(sim_collector.Collector):
         while self.next <= self.t:
             self.next += 1.0 / self.a.record_fps
         buffer = self.buf
+        try:
+            camera_frames, camera_timestamp = self.stereo_camera.latest(
+                self.a.camera_timeout
+            )
+        except RuntimeError as exc:
+            self._discard_episode(
+                f"stereo_camera_error: {exc}",
+                require_return=True,
+            )
+            return
+        if camera_timestamp == self.last_recorded_camera_timestamp:
+            return
+        self.last_recorded_camera_timestamp = camera_timestamp
         record_timestamp = time.monotonic()
 
         action = np.r_[
@@ -1251,15 +1994,21 @@ class RealCollector(sim_collector.Collector):
         buffer["qpos"].append(qpos)
         buffer["qvel"].append(qvel)
 
-        for name, renderer in self.ren.items():
-            image = self._render_camera(name, renderer)
-            image_timestamp = time.monotonic()
-            buffer["images"][name].append(image)
-            buffer["timestamps"][name].append(image_timestamp)
-            if name == "wrist":
-                self.wrist_frame = image
+        for name in STEREO_CAMERA_NAMES:
+            buffer["images"][name].append(camera_frames[name])
+            buffer["timestamps"][name].append(camera_timestamp)
 
         sent = self._sent_motor_target()
+        buffer["sent_action"].append(
+            np.r_[
+                sent[:umc.ARM_DOF],
+                self._normalized_gripper_feedback(sent[umc.ARM_DOF]),
+                sim_collector.HOME_Q,
+                1.0,
+            ]
+        )
+        sent_feedforward = self.hardware_bridge.get_sent_feedforward_torque()
+        motor_timing = self.hardware_bridge.get_control_timing()
         tracking_error = (
             sent[:umc.ARM_DOF] - self.latest_motor_q[:umc.ARM_DOF]
         )
@@ -1277,6 +2026,23 @@ class RealCollector(sim_collector.Collector):
         diagnostics["tcp_residual"].append(
             [self.target_position_error, self.target_rotation_error]
         )
+        diagnostics["gravity_feedforward_raw"].append(
+            self.latest_gravity_feedforward_raw.copy()
+        )
+        diagnostics["gravity_feedforward_command"].append(
+            self.latest_gravity_feedforward_command.copy()
+        )
+        diagnostics["gravity_feedforward_sent"].append(sent_feedforward)
+        diagnostics["motor_control_frequency_hz"].append(
+            motor_timing["frequency_hz"]
+        )
+        diagnostics["motor_control_mean_dt"].append(
+            motor_timing["mean_dt"]
+        )
+        diagnostics["motor_control_max_dt"].append(
+            motor_timing["max_dt"]
+        )
+        diagnostics["control_dt"].append(self.latest_control_dt)
         self._record_target_clamp_sample()
 
         timestamps = buffer["timestamps"]
@@ -1284,37 +2050,8 @@ class RealCollector(sim_collector.Collector):
         timestamps["can"].append(self.latest_can_timestamp)
         timestamps["action"].append(self.last_action_timestamp)
 
-        contact, _ = sim_collector.pad_contact_summary(
-            self.m, self.d, self.cg, self.pads
-        )
-        bilateral = contact[0] > 0 and contact[1] > 0
-        if bilateral:
-            if self.grasp_since is None:
-                self.grasp_since = self.t
-            if (
-                not self.grasped
-                and self.t - self.grasp_since
-                >= sim_collector.GRASP_HOLD_SECONDS
-            ):
-                self.grasped = True
-                print("[record] Stable simulated grasp acquired")
-        else:
-            self.grasp_since = None
-
-        in_basket = self.grasped and self.in_basket()
-        if in_basket and self.basket_since is None:
-            self.basket_since = self.t
-        elif not in_basket:
-            self.basket_since = None
-
-        if (
-            self.basket_since is not None
-            and self.t - self.basket_since
-            >= sim_collector.BASKET_HOLD_SECONDS
-        ):
-            self._finish_success()
-        elif len(buffer["action"]) >= sim_collector.MAX_TIMESTEPS:
-            self._finish_diagnostic("timeout")
+        if len(buffer["action"]) >= sim_collector.MAX_TIMESTEPS:
+            self._discard_episode("recording_limit", require_return=True)
 
     def _handle_terminal_key(self, key):
         if key == "a":
@@ -1332,6 +2069,12 @@ class RealCollector(sim_collector.Collector):
                 self.start()
             elif self.mode == self.RECORDING:
                 self._discard_episode("operator_abort", require_return=True)
+        elif key == "y" and self.mode == self.RECORDING:
+            self._finish_success()
+        elif key == "n" and self.mode == self.RECORDING:
+            self._discard_episode(
+                "operator_failure", require_return=True, auto_home=True
+            )
         elif key == "o":
             if self.mode != self.READY_MODE or self.keyboard.is_pressed("i"):
                 print("[scene] O requires READY state with I released")
@@ -1352,7 +2095,7 @@ class RealCollector(sim_collector.Collector):
             self._safety_fault("terminal_estop")
         elif key == "v":
             self._toggle_video()
-        elif key == "d":
+        elif key == "d" and self.mode != self.ARMED:
             print("[record] D is no longer needed; Space aborts and discards")
         elif key == "m":
             print("[panel] Manual MuJoCo arm control is disabled in real mode")
@@ -1362,8 +2105,11 @@ class RealCollector(sim_collector.Collector):
 
     def run(self):
         print(
-            "Real VR ACT collector: A arm, P calibrate, hold I control, "
-            "Space record/abort, hold I+R return, E estop, Q/Esc quit"
+            "Real VR ACT collector: A arm + auto-home, hold I+R return, "
+            "before P hold U/D gripper open/close, P calibrate, "
+            "hold I control, Space start/abort, "
+            "Y success/save + auto-home, N failure/discard + auto-home, "
+            "E estop, Q/Esc quit"
         )
         print("[safety] Motors remain disabled until A is pressed")
         terminal_keys = []
@@ -1376,6 +2122,15 @@ class RealCollector(sim_collector.Collector):
             print(
                 f"[safety] Global keyboard input: "
                 f"{self.keyboard.device_name} ({self.keyboard.device})"
+            )
+            self.stereo_camera.start(self.a.camera_start_timeout)
+            print(
+                f"[camera] Real stereo RGB active: "
+                f"{self.stereo_camera.device} "
+                f"({self.stereo_camera.raw_width}x"
+                f"{self.stereo_camera.raw_height} -> 2 x "
+                f"{self.stereo_camera.output_width}x"
+                f"{self.stereo_camera.output_height})"
             )
             self.connect()
 
@@ -1486,7 +2241,15 @@ class RealCollector(sim_collector.Collector):
                         running = False
                     time.sleep(0.001)
         except KeyboardInterrupt:
-            print("\n[exit] Keyboard interrupt; shutting down safely")
+            if self.hardware_armed:
+                try:
+                    self._return_home_before_shutdown()
+                except KeyboardInterrupt:
+                    self._safety_fault("ctrl_c_return_interrupted")
+                except Exception as exc:
+                    self._safety_fault("ctrl_c_return_failed", exc)
+            else:
+                print("\n[exit] Keyboard interrupt; motors are disabled")
         except Exception as exc:
             if self.hardware_armed:
                 self._safety_fault("unhandled_exception", exc)
@@ -1540,6 +2303,9 @@ class RealCollector(sim_collector.Collector):
             except Exception as exc:
                 print(f"[cleanup] {label}: {exc}", file=sys.stderr)
 
+        stereo_camera = getattr(self, "stereo_camera", None)
+        if stereo_camera is not None:
+            close_safely("stereo camera", stereo_camera.stop)
         for name, renderer in self.ren.items():
             close_safely(f"renderer {name}", renderer.close)
         close_safely("video renderer", self.video_renderer.close)
@@ -1596,11 +2362,25 @@ def parse_args(argv=None):
     parser.add_argument(
         "--motor-smoothing", type=float, default=umc.MOTOR_SMOOTHING
     )
+    parser.add_argument(
+        "--gravity-compensation-scale",
+        type=float,
+        default=1.0,
+        help="Scale bounded MuJoCo static-gravity torque feedforward [0, 1]",
+    )
     parser.add_argument("--motor-freq", type=float, default=None)
     parser.add_argument(
         "--calibration-record",
         type=Path,
         default=umc.CALIBRATION_RECORD,
+    )
+    parser.add_argument(
+        "--motor-max-speed",
+        type=float,
+        nargs=7,
+        default=DEFAULT_MOTOR_MAX_SPEED,
+        metavar=("J1", "J2", "J3", "J4", "J5", "J6", "GRIPPER"),
+        help="Per-motor command speed limits [rad/s x6, motor-unit/s]",
     )
     parser.add_argument("--skip-mapped-control-check", action="store_true")
     parser.add_argument("--disable-gripper", action="store_true")
@@ -1614,12 +2394,43 @@ def parse_args(argv=None):
     parser.add_argument("--output-dir", default=str(REAL_OUTPUT_DIR))
     parser.add_argument("--diagnostic-dir", default=None)
     parser.add_argument(
+        "--camera-device",
+        type=Path,
+        default=DEFAULT_STEREO_CAMERA_DEVICE,
+        help="V4L2 image node for the side-by-side stereo stream",
+    )
+    parser.add_argument("--camera-raw-width", type=int, default=2560)
+    parser.add_argument("--camera-raw-height", type=int, default=720)
+    parser.add_argument("--camera-output-width", type=int, default=640)
+    parser.add_argument("--camera-output-height", type=int, default=360)
+    parser.add_argument("--camera-fps", type=float, default=30.0)
+    parser.add_argument("--camera-timeout", type=float, default=0.5)
+    parser.add_argument("--camera-start-timeout", type=float, default=5.0)
+    parser.add_argument(
+        "--vr-view",
+        choices=("real", "sim"),
+        default="real",
+        help="Headset background source: real stereo camera or MuJoCo",
+    )
+    parser.add_argument(
+        "--swap-vr-camera-eyes",
+        action="store_true",
+        help="Swap real left/right images only in the headset display",
+    )
+    parser.add_argument(
         "--show-wrist",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
+        help="Show the simulated wrist debug view; it is never recorded",
     )
-    parser.add_argument("--position-scale", type=float, default=0.75)
-    parser.add_argument("--record-fps", type=int, default=50)
+    parser.add_argument("--position-scale", type=float, default=1.0)
+    parser.add_argument("--record-fps", type=int, default=30)
+    parser.add_argument(
+        "--future-qpos-delay",
+        type=float,
+        default=None,
+        help="Future observed-qpos offset in seconds; default is one record frame",
+    )
     parser.add_argument("--control-hz", type=float, default=60.0)
     parser.add_argument("--image-width", type=int, default=640)
     parser.add_argument("--image-height", type=int, default=480)
@@ -1635,11 +2446,22 @@ def parse_args(argv=None):
         metavar=("W1", "W2", "W3", "W4", "W5", "W6"),
     )
     parser.add_argument("--ik-damping", type=float, default=0.08)
-    parser.add_argument("--ik-orientation-weight", type=float, default=0.35)
-    parser.add_argument("--joint-max-speed", type=float, default=2.0)
-    parser.add_argument("--joint-max-acceleration", type=float, default=10.0)
+    parser.add_argument("--ik-orientation-weight", type=float, default=0.7)
+    parser.add_argument("--ik-posture-gain", type=float, default=0.5)
+    parser.add_argument("--joint-max-speed", type=float, default=1.2)
+    parser.add_argument("--joint-max-acceleration", type=float, default=8.0)
     parser.add_argument("--joint-limit-margin", type=float, default=0.0)
-    parser.add_argument("--command-smoothing-tau", type=float, default=0.06)
+    parser.add_argument("--command-smoothing-tau", type=float, default=0.02)
+    parser.add_argument(
+        "--command-lookahead",
+        type=float,
+        default=0.08,
+        help="Short IK target horizon in seconds; prevents target backlog",
+    )
+    parser.add_argument(
+        "--max-command-lead-deg", type=float, default=6.0,
+        help="Maximum arm command lead over fresh CAN feedback",
+    )
     parser.add_argument("--arm-feedback-timeout", type=float, default=2.0)
     parser.add_argument(
         "--can-timeout",
@@ -1650,13 +2472,23 @@ def parse_args(argv=None):
     parser.add_argument("--tracking-error-duration", type=float, default=0.3)
     parser.add_argument("--vr-stale-timeout", type=float, default=0.25)
     parser.add_argument("--vr-loss-discard-time", type=float, default=0.5)
+    parser.add_argument("--vr-position-filter-hz", type=float, default=10.0)
+    parser.add_argument("--vr-rotation-filter-hz", type=float, default=8.0)
+    parser.add_argument("--vr-position-deadband", type=float, default=0.002)
+    parser.add_argument("--vr-rotation-deadband-deg", type=float, default=0.5)
     parser.add_argument("--return-tolerance-deg", type=float, default=2.0)
     parser.add_argument(
         "--return-velocity-tolerance", type=float, default=0.05
     )
     parser.add_argument("--return-settle-time", type=float, default=0.3)
+    parser.add_argument(
+        "--ctrl-c-return-speed",
+        type=float,
+        default=DEFAULT_CTRL_C_RETURN_SPEED,
+        help="Maximum joint speed for automatic Ctrl-C return [rad/s]",
+    )
     parser.add_argument("--scene-settle-time", type=float, default=0.5)
-    parser.add_argument("--gripper-open-distance", type=float, default=0.15)
+    parser.add_argument("--gripper-open-distance", type=float, default=0.10)
     parser.add_argument("--gripper-smoothing-tau", type=float, default=0.08)
     parser.add_argument("--gripper-max-speed", type=float, default=0.12)
     parser.add_argument("--cup-y", type=float, default=None)
@@ -1674,29 +2506,98 @@ def parse_args(argv=None):
     parser.add_argument("--key-file", default=str(DEFAULT_KEY_FILE))
 
     args = parser.parse_args(argv)
+    if args.record_fps <= 0:
+        parser.error("--record-fps must be positive")
+    if args.future_qpos_delay is None:
+        args.future_qpos_delay = 1.0 / args.record_fps
+    elif args.future_qpos_delay <= 0.0:
+        parser.error("--future-qpos-delay must be positive")
     if args.motor_enable == args.dry_run:
         parser.error("choose exactly one of --motor-enable or --dry-run")
     if args.gripper_motor_open_pos <= 0:
         parser.error("--gripper-motor-open-pos must be positive")
+    if args.kp is not None:
+        gains = np.asarray(args.kp, dtype=np.float64)
+        if (
+            gains.shape != (umc.NUM_MOTORS,)
+            or not np.isfinite(gains).all()
+            or np.any(gains < 0.0)
+            or np.any(gains > umc.MAX_RUNTIME_KP)
+        ):
+            parser.error(
+                f"--kp must contain seven values in [0, {umc.MAX_RUNTIME_KP:g}]"
+            )
+    if args.kd is not None:
+        gains = np.asarray(args.kd, dtype=np.float64)
+        if (
+            gains.shape != (umc.NUM_MOTORS,)
+            or not np.isfinite(gains).all()
+            or np.any(gains < 0.0)
+            or np.any(gains > umc.MAX_RUNTIME_KD)
+        ):
+            parser.error(
+                f"--kd must contain seven values in [0, {umc.MAX_RUNTIME_KD:g}]"
+            )
+    motor_speeds = np.asarray(args.motor_max_speed, dtype=np.float64)
+    if (
+        motor_speeds.shape != (umc.NUM_MOTORS,)
+        or not np.isfinite(motor_speeds).all()
+        or np.any(motor_speeds <= 0)
+    ):
+        parser.error("--motor-max-speed must contain seven positive values")
     positive = (
         "record_fps",
         "control_hz",
+        "position_scale",
+        "camera_raw_width",
+        "camera_raw_height",
+        "camera_output_width",
+        "camera_output_height",
+        "camera_fps",
+        "camera_timeout",
+        "camera_start_timeout",
+        "tcp_max_linear_speed",
+        "tcp_max_angular_speed",
+        "tcp_linear_gain",
+        "tcp_angular_gain",
+        "joint_max_speed",
+        "joint_max_acceleration",
         "command_smoothing_tau",
+        "command_lookahead",
+        "max_command_lead_deg",
         "arm_feedback_timeout",
         "can_timeout",
         "tracking_error_deg",
         "tracking_error_duration",
         "vr_stale_timeout",
         "vr_loss_discard_time",
+        "vr_position_filter_hz",
+        "vr_rotation_filter_hz",
         "return_tolerance_deg",
         "return_velocity_tolerance",
         "return_settle_time",
+        "ctrl_c_return_speed",
         "scene_settle_time",
         "ik_orientation_weight",
+        "ik_posture_gain",
     )
     for name in positive:
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
+    if not 0.0 <= args.motor_smoothing <= 1.0:
+        parser.error("--motor-smoothing must be in [0, 1]")
+    if not 0.0 <= args.gravity_compensation_scale <= 1.0:
+        parser.error("--gravity-compensation-scale must be in [0, 1]")
+    if args.vr_position_deadband < 0.0 or args.vr_rotation_deadband_deg < 0.0:
+        parser.error("VR pose deadbands must be non-negative")
+    if args.max_command_lead_deg >= args.tracking_error_deg:
+        parser.error(
+            "--max-command-lead-deg must be less than --tracking-error-deg"
+        )
+    if args.ctrl_c_return_speed > 0.3:
+        parser.error("--ctrl-c-return-speed must not exceed 0.3 rad/s")
+    if args.camera_raw_width % 2:
+        parser.error("--camera-raw-width must be even for side-by-side stereo")
     if args.vr_stale_timeout >= args.vr_loss_discard_time:
         parser.error(
             "--vr-stale-timeout must be less than "

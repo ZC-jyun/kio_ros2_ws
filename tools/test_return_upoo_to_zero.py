@@ -40,6 +40,22 @@ class ReturnToZeroTest(unittest.TestCase):
             path.write_text(json.dumps(data), encoding="utf-8")
             return homing.validate_zero_calibration(path)
 
+    def test_default_openarm_reference_gains_are_accepted(self):
+        args = homing.parse_args([])
+        self.assertEqual(args.kp, umc.DEFAULT_KP[:umc.ARM_DOF])
+        self.assertEqual(args.kd, umc.DEFAULT_KD[:umc.ARM_DOF])
+
+    def test_runtime_gain_boundaries_are_enforced(self):
+        accepted = homing.parse_args(
+            ["--kp"] + ["240"] * 6 + ["--kd"] + ["5"] * 6
+        )
+        self.assertEqual(accepted.kp, [240.0] * 6)
+        self.assertEqual(accepted.kd, [5.0] * 6)
+        with self.assertRaises(SystemExit):
+            homing.parse_args(["--kp"] + ["240.1"] * 6)
+        with self.assertRaises(SystemExit):
+            homing.parse_args(["--kd"] + ["5.1"] * 6)
+
     def test_complete_zero_record_passes_without_direction_tests(self):
         data = self.complete_zero_record()
         checked = self.validate_record(data)

@@ -912,14 +912,15 @@ class HardwareMotorBridge:
     """Thread-safe bridge between IK joint angles and DM motor CAN control.
 
     Runs a background thread at ~1 kHz that reads target joint angles,
-    applies smoothing and safety clipping, and sends MIT commands.
+    applies time-based slew limits and bounded torque feedforward, and sends
+    MIT commands.
     """
 
     def __init__(
         self,
         kp=None,
         kd=None,
-        motor_smoothing=0.3,
+        motor_smoothing=umc.MOTOR_SMOOTHING,
         max_step=None,
         device_sn=None,
         enable_gripper=True,
@@ -943,6 +944,8 @@ class HardwareMotorBridge:
         umc.validate_calibration_record(
             self._calibration_record,
             require_control_tests=self._require_control_tests,
+            expected_kp=self._kp,
+            expected_kd=self._kd,
         )
         if not self._require_control_tests:
             print(
@@ -961,6 +964,12 @@ class HardwareMotorBridge:
             raise ValueError("kp/kd must contain only finite values")
         if (self._kp < 0).any() or (self._kd < 0).any():
             raise ValueError("kp/kd must be non-negative")
+        if (self._kp > umc.MAX_RUNTIME_KP).any():
+            raise ValueError(
+                f"kp must not exceed {umc.MAX_RUNTIME_KP:g}"
+            )
+        if (self._kd > umc.MAX_RUNTIME_KD).any():
+            raise ValueError(f"kd must not exceed {umc.MAX_RUNTIME_KD:g}")
         if not 0.0 <= self._motor_smoothing <= 1.0:
             raise ValueError("motor_smoothing must be in [0, 1]")
         if umc.MOTOR_CTRL_FREQ <= 0:
@@ -969,12 +978,21 @@ class HardwareMotorBridge:
         # Shared state (protected by _lock)
         self._lock = threading.Lock()
         self._target_q = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
+        self._target_feedforward_tau = np.zeros(
+            umc.NUM_MOTORS, dtype=np.float64
+        )
         self._emergency_stop = False
         self._last_sent_q = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
+        self._last_sent_feedforward_tau = np.zeros(
+            umc.NUM_MOTORS, dtype=np.float64
+        )
         self._last_read_q = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
         self._last_read_dq = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
         self._last_read_torque = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
         self._motor_err = np.zeros(umc.NUM_MOTORS, dtype=np.int32)
+        self._loop_frequency_hz = 0.0
+        self._loop_mean_dt = 0.0
+        self._loop_max_dt = 0.0
 
         # Thread control
         self._running = threading.Event()
@@ -1044,17 +1062,42 @@ class HardwareMotorBridge:
         self._startup_limit_lo[umc.ARM_DOF] = self._limit_lo[umc.ARM_DOF]
         self._startup_limit_hi[umc.ARM_DOF] = self._limit_hi[umc.ARM_DOF]
 
-        # Per-motor step limit: prevents bug-induced target jumps (rad/tick at 1kHz)
+        # Time-based slew limits remain correct when the CAN loop misses its
+        # nominal frequency.
         if max_step is not None:
-            self._max_step = np.broadcast_to(np.asarray(max_step, dtype=np.float64),
-                                             umc.NUM_MOTORS).copy()
+            legacy_step = np.broadcast_to(
+                np.asarray(max_step, dtype=np.float64),
+                umc.NUM_MOTORS,
+            ).copy()
+            self._max_speed = legacy_step * float(umc.MOTOR_CTRL_FREQ)
         else:
-            max_speed = np.asarray(umc.MAX_COMMAND_SPEED, dtype=np.float64)
-            if max_speed.shape != (umc.NUM_MOTORS,) or (max_speed <= 0).any():
+            self._max_speed = np.asarray(
+                umc.MAX_COMMAND_SPEED, dtype=np.float64
+            )
+            if (
+                self._max_speed.shape != (umc.NUM_MOTORS,)
+                or (self._max_speed <= 0).any()
+            ):
                 raise ValueError(
                     f"MAX_COMMAND_SPEED must contain {umc.NUM_MOTORS} positive values"
                 )
-            self._max_step = max_speed / float(umc.MOTOR_CTRL_FREQ)
+        self._feedforward_torque_limit = np.asarray(
+            umc.MAX_FEEDFORWARD_TORQUE, dtype=np.float64
+        )
+        self._feedforward_torque_slew = np.asarray(
+            umc.MAX_FEEDFORWARD_TORQUE_SLEW, dtype=np.float64
+        )
+        for name, values in (
+            ("MAX_FEEDFORWARD_TORQUE", self._feedforward_torque_limit),
+            (
+                "MAX_FEEDFORWARD_TORQUE_SLEW",
+                self._feedforward_torque_slew,
+            ),
+        ):
+            if values.shape != (umc.NUM_MOTORS,) or (values < 0).any():
+                raise ValueError(
+                    f"{name} must contain {umc.NUM_MOTORS} non-negative values"
+                )
 
         # Track which motors are actually present on the bus
         self._motor_connected = [False] * umc.NUM_MOTORS
@@ -1092,8 +1135,10 @@ class HardwareMotorBridge:
 
         # Reset tracked positions to zero
         self._last_sent_q[:] = 0.0
+        self._last_sent_feedforward_tau[:] = 0.0
         with self._lock:
             self._target_q[:] = 0.0
+            self._target_feedforward_tau[:] = 0.0
 
         # Resume motor thread
         if was_running:
@@ -1113,6 +1158,8 @@ class HardwareMotorBridge:
         umc.validate_calibration_record(
             self._calibration_record,
             require_control_tests=self._require_control_tests,
+            expected_kp=self._kp,
+            expected_kd=self._kd,
         )
         self._validate_motor_parameters()
 
@@ -1129,9 +1176,11 @@ class HardwareMotorBridge:
                     f"startup limits [{allowed_lo:+.4f}, {allowed_hi:+.4f}]"
                 )
         self._last_sent_q[:] = positions
+        self._last_sent_feedforward_tau[:] = 0.0
         self._last_read_q[:] = positions
         with self._lock:
             self._target_q[:] = positions
+            self._target_feedforward_tau[:] = 0.0
         print(f"[motor] Pre-enable positions: "
               f"{[round(self._target_q[i], 4) for i in self._active_indices]}")
 
@@ -1248,16 +1297,40 @@ class HardwareMotorBridge:
         # We skip it — the OS reclaims USB resources on process exit.
         print("[motor] Stopped.")
 
-    def set_target(self, q: np.ndarray):
+    def set_target(
+        self,
+        q: np.ndarray,
+        feedforward_torque: np.ndarray | None = None,
+    ):
         q = np.asarray(q, dtype=np.float64).ravel()
         if q.shape[0] != umc.NUM_MOTORS:
             raise ValueError(f"Expected {umc.NUM_MOTORS} targets, got {q.shape[0]}")
         if not np.isfinite(q).all():
             raise ValueError("Motor targets must contain only finite values")
+        if feedforward_torque is None:
+            feedforward_torque = np.zeros(umc.NUM_MOTORS, dtype=np.float64)
+        feedforward_torque = np.asarray(
+            feedforward_torque, dtype=np.float64
+        ).ravel()
+        if (
+            feedforward_torque.shape != (umc.NUM_MOTORS,)
+            or not np.isfinite(feedforward_torque).all()
+        ):
+            raise ValueError(
+                "Feedforward torque must contain seven finite values"
+            )
         with self._lock:
             if self._emergency_stop:
                 return
             np.copyto(self._target_q, np.clip(q, self._limit_lo, self._limit_hi))
+            np.copyto(
+                self._target_feedforward_tau,
+                np.clip(
+                    feedforward_torque,
+                    -self._feedforward_torque_limit,
+                    self._feedforward_torque_limit,
+                ),
+            )
 
     def get_state(self):
         """Return feedback in MuJoCo coordinates (q, dq, torque, faults)."""
@@ -1265,9 +1338,28 @@ class HardwareMotorBridge:
             return (self._last_read_q.copy(), self._last_read_dq.copy(),
                     self._last_read_torque.copy(), self._motor_err.copy())
 
+    def get_sent_target(self):
+        with self._lock:
+            return self._last_sent_q.copy()
+
+    def get_sent_feedforward_torque(self):
+        with self._lock:
+            return self._last_sent_feedforward_tau.copy()
+
+    def get_control_timing(self):
+        with self._lock:
+            return {
+                "frequency_hz": float(self._loop_frequency_hz),
+                "mean_dt": float(self._loop_mean_dt),
+                "max_dt": float(self._loop_max_dt),
+                "target_frequency_hz": float(umc.MOTOR_CTRL_FREQ),
+            }
+
     def emergency_stop(self):
         with self._lock:
             self._emergency_stop = True
+            self._target_feedforward_tau[:] = 0.0
+            self._last_sent_feedforward_tau[:] = 0.0
             self._running.clear()
             self._motor_connected = [False] * umc.NUM_MOTORS
         print("[motor] EMERGENCY STOP: disabling motors", file=sys.stderr)
@@ -1275,47 +1367,86 @@ class HardwareMotorBridge:
 
     # ── Motor control thread ──────────────────────────────────
 
+    @staticmethod
+    def _rate_limited_position(
+        last_q,
+        target_q,
+        max_speed,
+        dt,
+        target_weight,
+    ):
+        filtered_target = last_q + target_weight * (target_q - last_q)
+        max_delta = max_speed * dt
+        return last_q + np.clip(
+            filtered_target - last_q,
+            -max_delta,
+            max_delta,
+        )
+
     def _motor_thread(self):
         period = 1.0 / umc.MOTOR_CTRL_FREQ
         last_debug_ts = time.monotonic()
         _thread_start = time.monotonic()  # grace period reference
+        previous_cycle_start = None
+        timing_window_start = _thread_start
+        timing_count = 0
+        timing_dt_sum = 0.0
+        timing_max_dt = 0.0
 
         while self._running.is_set():
             t_start = time.perf_counter()
+            cycle_start = time.monotonic()
+            raw_dt = (
+                period
+                if previous_cycle_start is None
+                else max(cycle_start - previous_cycle_start, 1e-6)
+            )
+            previous_cycle_start = cycle_start
+            slew_dt = min(raw_dt, umc.MAX_SLEW_DT_SEC)
 
-            estop, target, kp, kd = self._snapshot_targets()
+            estop, target, target_tau, kp, kd = self._snapshot_targets()
             if estop:
                 break
 
-            # Per-motor step limit: clamp target deltas to prevent wild jumps
-            for i in range(umc.NUM_MOTORS):
-                diff = target[i] - self._last_sent_q[i]
-                if diff > self._max_step[i]:
-                    target[i] = self._last_sent_q[i] + self._max_step[i]
-                elif diff < -self._max_step[i]:
-                    target[i] = self._last_sent_q[i] - self._max_step[i]
+            sent_q = self._rate_limited_position(
+                self._last_sent_q,
+                target,
+                self._max_speed,
+                slew_dt,
+                self._motor_smoothing,
+            )
+            sent_q = np.clip(
+                sent_q,
+                self._startup_limit_lo,
+                self._startup_limit_hi,
+            )
+            max_tau_delta = self._feedforward_torque_slew * slew_dt
+            sent_tau = self._last_sent_feedforward_tau + np.clip(
+                target_tau - self._last_sent_feedforward_tau,
+                -max_tau_delta,
+                max_tau_delta,
+            )
+            sent_tau = np.clip(
+                sent_tau,
+                -self._feedforward_torque_limit,
+                self._feedforward_torque_limit,
+            )
+            with self._lock:
+                self._last_sent_q[:] = sent_q
+                self._last_sent_feedforward_tau[:] = sent_tau
 
             for i in range(umc.NUM_MOTORS):
-                smooth_q = (
-                    (1.0 - self._motor_smoothing) * self._last_sent_q[i]
-                    + self._motor_smoothing * target[i]
-                )
-                # Preserve a validated startup pose just outside a soft limit.
-                # Public targets are clipped to the normal soft limits in set_target().
-                clipped_q = float(np.clip(
-                    smooth_q, self._startup_limit_lo[i], self._startup_limit_hi[i]))
-                self._last_sent_q[i] = clipped_q
-
                 if not self._motor_connected[i]:
                     continue
                 motor = self._control.getMotor(self._can_ids[i])
                 if motor is None:
                     continue
                 try:
-                    motor_q = self._direction[i] * clipped_q
+                    motor_q = self._direction[i] * sent_q[i]
+                    motor_tau = self._direction[i] * sent_tau[i]
                     self._control.control_mit(
                         motor, float(kp[i]), float(kd[i]),
-                        motor_q, 0.0, 0.0,
+                        motor_q, 0.0, float(motor_tau),
                     )
                 except Exception as exc:
                     print(f"[motor] control_mit error motor {i}: {exc}", file=sys.stderr)
@@ -1335,6 +1466,20 @@ class HardwareMotorBridge:
 
             # CAN timeout (skip during startup grace period, connected motors only)
             now = time.monotonic()
+            timing_count += 1
+            timing_dt_sum += raw_dt
+            timing_max_dt = max(timing_max_dt, raw_dt)
+            timing_elapsed = now - timing_window_start
+            if timing_elapsed >= 1.0:
+                with self._lock:
+                    self._loop_frequency_hz = timing_count / timing_elapsed
+                    self._loop_mean_dt = timing_dt_sum / timing_count
+                    self._loop_max_dt = timing_max_dt
+                timing_window_start = now
+                timing_count = 0
+                timing_dt_sum = 0.0
+                timing_max_dt = 0.0
+
             if now - _thread_start > 5.0:
                 for i in range(umc.NUM_MOTORS):
                     if not self._motor_connected[i]:
@@ -1350,7 +1495,19 @@ class HardwareMotorBridge:
             if now - last_debug_ts >= 5.0:
                 pos_str = " ".join(f"{self._last_sent_q[i]:.3f}" for i in range(umc.ARM_DOF))
                 err_str = " ".join(str(self._motor_err[i]) for i in range(umc.NUM_MOTORS))
-                print(f"[motor] cmd=[{pos_str}] grip={self._last_sent_q[umc.ARM_DOF]:.4f} err=[{err_str}]")
+                timing = self.get_control_timing()
+                tau_str = " ".join(
+                    f"{self._last_sent_feedforward_tau[i]:+.2f}"
+                    for i in range(umc.ARM_DOF)
+                )
+                print(
+                    f"[motor] cmd=[{pos_str}] "
+                    f"grip={self._last_sent_q[umc.ARM_DOF]:.4f} "
+                    f"ff_tau=[{tau_str}] err=[{err_str}] "
+                    f"loop={timing['frequency_hz']:.1f}Hz "
+                    f"mean_dt={timing['mean_dt'] * 1e3:.2f}ms "
+                    f"max_dt={timing['max_dt'] * 1e3:.2f}ms"
+                )
                 last_debug_ts = now
 
             elapsed = time.perf_counter() - t_start
@@ -1363,6 +1520,7 @@ class HardwareMotorBridge:
             return (
                 bool(self._emergency_stop),
                 self._target_q.copy(),
+                self._target_feedforward_tau.copy(),
                 self._kp.copy(),
                 self._kd.copy(),
             )

@@ -53,8 +53,12 @@ ZERO_VERIFY_TOLERANCE_RAD = 0.10
 
 # ── MIT control gains per joint ────────────────────────────────
 # [Base_J01, J02, J03, J04, J05, J06, gripper]
-DEFAULT_KP = [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 0.5]
-DEFAULT_KD = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.8]
+DEFAULT_KP = [240.0, 240.0, 120.0, 40.0, 24.0, 31.0, 0.5]
+DEFAULT_KD = [5.0, 5.0, 1.5, 0.3, 0.3, 0.3, 0.8]
+# The wire protocol can encode Kp up to 500, but the robot application uses
+# a deliberately lower bound to limit stiffness and impact energy.
+MAX_RUNTIME_KP = 240.0
+MAX_RUNTIME_KD = 5.0
 
 # ── Soft position limits (radians) ─────────────────────────────
 # Slightly tighter than MuJoCo joint ranges for safety margin.
@@ -64,7 +68,7 @@ SOFT_POSITION_LIMITS = {
     "J02":      (-3.00,  0.00),
     "J03":      (-1.50,  1.50),
     "J04":      (-0.70,  2.50),
-    "J05":      (-1.50,  1.50),
+    "J05":      (-1.50,  1.60),
     "J06":      (-1.50,  1.50),
     "gripper":  ( 0.00,  5.00),
 }
@@ -76,7 +80,7 @@ HARD_POSITION_LIMITS = {
     "J02":      (-3.14,  0.00),
     "J03":      (-1.57,  1.57),
     "J04":      (-0.78,  2.60),
-    "J05":      (-1.57,  1.57),
+    "J05":      (-1.57,  1.60),
     "J06":      (-1.57,  1.57),
     "gripper":  ( 0.00,  5.00),
 }
@@ -88,14 +92,20 @@ DAT_BAUD = 5_000_000      # CANFD data baud rate
 
 # ── Motor control parameters ────────────────────────────────────
 MOTOR_CTRL_FREQ = 1000.0   # Hz
-MOTOR_SMOOTHING = 0.3      # exponential smoothing (0=instant, 1=no change)
+MOTOR_SMOOTHING = 1.0      # target weight (1=immediate, 0=no motion)
 CAN_TIMEOUT_SEC = 0.2      # trigger estop if no CAN frame within this window
 IK_DIVERGENCE_THRESH = 0.5 # rad, skip motor update if IK dq exceeds this
+MAX_SLEW_DT_SEC = 0.05     # cap one delayed loop's allowed position/torque step
 
 # Maximum command slew rates in joint units per second. These deliberately
 # conservative values are intended for the first hardware teleoperation tests.
 # [Base_J01, J02, J03, J04, J05, J06, gripper]
 MAX_COMMAND_SPEED = [0.25, 0.20, 0.20, 0.30, 0.30, 0.30, 0.50]
+
+# Joint-coordinate gravity feedforward safety bounds. J04 needs 2.63 Nm to
+# hold the configured horizontal Home pose; the gripper receives none.
+MAX_FEEDFORWARD_TORQUE = [2.8, 2.8, 2.8, 3.0, 1.0, 1.0, 0.0]
+MAX_FEEDFORWARD_TORQUE_SLEW = [5.0, 5.0, 5.0, 3.0, 3.0, 3.0, 0.0]
 
 # Motor feedback status nibble. Values 0 and 1 describe operating state;
 # actual faults occupy 0x8 through 0xE in the DM protocol.
@@ -147,8 +157,19 @@ def startup_position_limits(joint_name):
     return lo, hi
 
 
-def validate_calibration_record(path=CALIBRATION_RECORD, require_control_tests=False):
+def validate_calibration_record(
+    path=CALIBRATION_RECORD,
+    require_control_tests=False,
+    expected_kp=None,
+    expected_kd=None,
+):
     """Validate direction, zero and optional mapped-control evidence."""
+    runtime_kp = DEFAULT_KP if expected_kp is None else list(expected_kp)
+    runtime_kd = DEFAULT_KD if expected_kd is None else list(expected_kd)
+    if len(runtime_kp) < ARM_DOF or len(runtime_kd) < ARM_DOF:
+        raise ValueError(
+            f"expected_kp/expected_kd must contain at least {ARM_DOF} values"
+        )
     path = Path(path)
     if not path.exists():
         raise RuntimeError(f"Calibration record not found: {path}")
@@ -180,9 +201,9 @@ def validate_calibration_record(path=CALIBRATION_RECORD, require_control_tests=F
                 problems.append(f"{joint_name}: mapped control test has not passed")
             else:
                 joint_index = [name for name, _, _ in ARM_MOTOR_CONFIG].index(joint_name)
-                if record.get("mapped_control_test_kp") != DEFAULT_KP[joint_index]:
+                if record.get("mapped_control_test_kp") != runtime_kp[joint_index]:
                     problems.append(f"{joint_name}: mapped control test Kp does not match runtime Kp")
-                if record.get("mapped_control_test_kd") != DEFAULT_KD[joint_index]:
+                if record.get("mapped_control_test_kd") != runtime_kd[joint_index]:
                     problems.append(f"{joint_name}: mapped control test Kd does not match runtime Kd")
                 if record.get("mapped_control_test_assist_torque") != 0.0:
                     problems.append(f"{joint_name}: mapped control test used unsupported assist torque")

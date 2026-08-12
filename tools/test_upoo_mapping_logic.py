@@ -24,6 +24,15 @@ class MotorMappingTest(unittest.TestCase):
         )
         self.assertEqual(umc.arm_direction_vector(), [1.0, -1.0, 1.0, 1.0, -1.0, 1.0])
 
+    def test_openarm_reference_gains_keep_gripper_independent(self):
+        self.assertEqual(umc.DEFAULT_KP, [240, 240, 120, 40, 24, 31, 0.5])
+        self.assertEqual(umc.DEFAULT_KD, [5, 5, 1.5, 0.3, 0.3, 0.3, 0.8])
+        self.assertEqual(umc.MAX_RUNTIME_KP, 240.0)
+        self.assertEqual(umc.MAX_RUNTIME_KD, 5.0)
+
+    def test_j04_feedforward_covers_horizontal_home_gravity(self):
+        self.assertEqual(umc.MAX_FEEDFORWARD_TORQUE[3], 3.0)
+
     def test_position_velocity_and_torque_round_trip(self):
         for joint, _, _ in umc.ARM_MOTOR_CONFIG:
             for value in (-1.2, -0.05, 0.0, 0.05, 1.2):
@@ -68,15 +77,37 @@ class MotorMappingTest(unittest.TestCase):
             })
         return data
 
-    def validate_temp_record(self, data, require_control_tests=True):
+    def validate_temp_record(
+        self,
+        data,
+        require_control_tests=True,
+        **runtime_gains,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "calibration.json"
             path.write_text(json.dumps(data), encoding="utf-8")
-            return umc.validate_calibration_record(path, require_control_tests)
+            return umc.validate_calibration_record(
+                path, require_control_tests, **runtime_gains
+            )
 
     def test_complete_record_passes(self):
         data = self.complete_record()
         self.assertIs(self.validate_temp_record(data)["motors"]["J05"]["verify_passed"], True)
+
+    def test_control_record_must_match_selected_runtime_kp(self):
+        data = self.complete_record()
+        data["motors"]["Base_J01"]["mapped_control_test_kp"] = 200.0
+        with self.assertRaisesRegex(RuntimeError, "runtime Kp"):
+            self.validate_temp_record(data)
+
+        runtime_kp = list(umc.DEFAULT_KP)
+        runtime_kp[0] = 200.0
+        result = self.validate_temp_record(
+            data,
+            expected_kp=runtime_kp,
+            expected_kd=umc.DEFAULT_KD,
+        )
+        self.assertTrue(result["motors"]["Base_J01"]["mapped_control_test_passed"])
 
     def test_wrong_reversed_joint_is_rejected(self):
         data = self.complete_record()

@@ -115,7 +115,7 @@ class MotorBridgeNode(Node):
     def __init__(self):
         super().__init__("motor_bridge")
 
-        self.declare_parameter("motor_smoothing", 0.3)
+        self.declare_parameter("motor_smoothing", 1.0)
         self.declare_parameter("device_sn", "")
         self.declare_parameter("kp", [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5])
         self.declare_parameter("kd", [0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8])

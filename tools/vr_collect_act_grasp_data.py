@@ -23,6 +23,9 @@ DEFAULT_JOINT_WEIGHTS=(1.,1.,1.,1.,1.,1.)
 with open(HOME_POSE_FILE, encoding="utf-8") as _home_file:
  _home_pose=yaml.safe_load(_home_file)["home_pose"]
 LEFT_HOME_Q=np.array([_home_pose["upoo_left_Base_J01"],_home_pose["upoo_left_J02"],_home_pose["upoo_left_J03"],_home_pose["upoo_left_J04"],_home_pose["upoo_left_J05"],_home_pose["upoo_left_J06"]],dtype=float)
+_left_home_fingers=np.array([_home_pose["upoo_left_finger_right_joint"],_home_pose["upoo_left_finger_left_joint"]],dtype=float)
+if not np.isfinite(_left_home_fingers).all()or not np.allclose(_left_home_fingers,_left_home_fingers[0])or not 0<=_left_home_fingers[0]<=GRIPPER_OPEN:raise ValueError("Left Home gripper fingers must be equal and in [0, GRIPPER_OPEN]")
+LEFT_HOME_GRIPPER=float(_left_home_fingers[0])
 def load_failure_targets(path):
  source=Path(path).expanduser().resolve();targets=[];seen=set()
  if not source.is_file():raise FileNotFoundError(f"Failure rollout file not found: {source}")
@@ -92,15 +95,16 @@ def rigid_pose(matrix,rotation_tolerance=.1):
 def clip_norm(v,maximum):
  n=np.linalg.norm(v)
  return v if n<=maximum else v*(maximum/n)
-def bounded_weighted_dls(jacobian,velocity,weight_matrix,damping,lower,upper):
+def bounded_weighted_dls(jacobian,velocity,weight_matrix,damping,lower,upper,preferred_velocity=None):
  """Solve a weighted DLS step while respecting per-joint velocity bounds."""
- q=np.zeros(jacobian.shape[1]);free=np.ones(q.size,dtype=bool)
+ q=np.zeros(jacobian.shape[1]);free=np.ones(q.size,dtype=bool);preferred=np.zeros_like(q)if preferred_velocity is None else np.asarray(preferred_velocity,dtype=float)
  for _ in range(q.size+1):
   indices=np.flatnonzero(free)
   if not indices.size:return q
   j=jacobian[:,indices];w=weight_matrix[np.ix_(indices,indices)]
-  try:proposal=np.linalg.solve(j.T@j+damping*damping*w,j.T@(velocity-jacobian@q))
-  except np.linalg.LinAlgError:proposal=np.linalg.lstsq(j.T@j+damping*damping*w,j.T@(velocity-jacobian@q),rcond=None)[0]
+  fixed=np.flatnonzero(~free);rhs=j.T@(velocity-jacobian@q)+damping*damping*(w@preferred[indices]-weight_matrix[np.ix_(indices,fixed)]@(q[fixed]-preferred[fixed]))
+  try:proposal=np.linalg.solve(j.T@j+damping*damping*w,rhs)
+  except np.linalg.LinAlgError:proposal=np.linalg.lstsq(j.T@j+damping*damping*w,rhs,rcond=None)[0]
   candidate=q.copy();candidate[indices]=proposal
   below=candidate[indices]<lower[indices];above=candidate[indices]>upper[indices]
   if not np.any(below|above):return candidate

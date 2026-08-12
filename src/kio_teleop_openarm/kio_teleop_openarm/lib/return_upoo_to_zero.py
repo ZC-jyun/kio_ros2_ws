@@ -367,10 +367,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--max-tracking-error must be in [0.05, 1.0] rad")
     if not 0.01 <= args.max_start_velocity <= 0.5:
         parser.error("--max-start-velocity must be in [0.01, 0.5] rad/s")
-    if any(not 0.0 < value <= 20.0 for value in args.kp):
-        parser.error("every --kp value must be in (0, 20]")
-    if any(not 0.0 <= value <= 1.0 for value in args.kd):
-        parser.error("every --kd value must be in [0, 1]")
+    if any(not 0.0 < value <= umc.MAX_RUNTIME_KP for value in args.kp):
+        parser.error(
+            f"every --kp value must be in (0, {umc.MAX_RUNTIME_KP:g}]"
+        )
+    if any(not 0.0 <= value <= umc.MAX_RUNTIME_KD for value in args.kd):
+        parser.error(
+            f"every --kd value must be in [0, {umc.MAX_RUNTIME_KD:g}]"
+        )
     return args
 
 

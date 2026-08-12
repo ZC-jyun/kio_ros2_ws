@@ -18,6 +18,7 @@ if str(PACKAGE_SRC) not in sys.path:
 from kio_teleop_openarm.lib import upoo_motor_constants as umc
 from test_upoo_motor_direction import (
     MIN_DIRECTION_MOTION_RAD,
+    RAMP_RATE_HZ,
     SingleMotorSession,
     confirmation,
     motor_specs,
@@ -37,6 +38,12 @@ def parse_args():
     parser.add_argument("--test-angle", type=float, default=0.02)
     parser.add_argument("--test-speed", type=float, default=0.005)
     parser.add_argument("--hold-seconds", type=float, default=0.5)
+    parser.add_argument(
+        "--return-settle-seconds",
+        type=float,
+        default=3.0,
+        help="Zero-feedforward hold at the start pose before judging return error.",
+    )
     parser.add_argument("--kp", type=float, default=None)
     parser.add_argument("--kd", type=float, default=None)
     parser.add_argument(
@@ -63,8 +70,12 @@ def parse_args():
         parser.error("--test-speed must be in (0, 0.02] rad/s")
     if not 0 < args.hold_seconds <= 2.0:
         parser.error("--hold-seconds must be in (0, 2.0] s")
-    if not 0 < args.kp <= 20.0 or not 0 <= args.kd <= 1.0:
-        parser.error("--kp must be in (0, 20] and --kd in [0, 1]")
+    if not 0 < args.return_settle_seconds <= 5.0:
+        parser.error("--return-settle-seconds must be in (0, 5.0] s")
+    if not 0 < args.kp <= umc.MAX_RUNTIME_KP or not 0 <= args.kd <= umc.MAX_RUNTIME_KD:
+        parser.error(
+            f"--kp must be in (0, {umc.MAX_RUNTIME_KP:g}] and "
+            f"--kd in [0, {umc.MAX_RUNTIME_KD:g}]")
     if not 0 <= args.assist_torque <= 0.5:
         parser.error("--assist-torque must be in [0, 0.5]")
     if not 0 <= args.return_assist_torque <= 0.5:
@@ -171,8 +182,30 @@ def main():
             session.ramp(
                 args.kp, args.kd, target_motor, start_motor,
                 args.test_speed, return_tau_motor)
-            session.command(args.kp, args.kd, start_motor, 0.0)
-            time.sleep(0.2)
+            print(
+                f"[test] Settling at start for {args.return_settle_seconds:.1f}s "
+                "with zero feedforward torque"
+            )
+            settle_deadline = time.monotonic() + args.return_settle_seconds
+            while time.monotonic() < settle_deadline:
+                session.command(
+                    args.kp, args.kd, start_motor, 0.0
+                )
+                time.sleep(1.0 / RAMP_RATE_HZ)
+                raw_sample = session.latest_feedback()
+                status = int(raw_sample[3])
+                if umc.is_motor_fault(status):
+                    raise RuntimeError(
+                        f"Motor fault 0x{status:X} during return settle"
+                    )
+                if time.monotonic() - session.feedback_timestamp() > 0.5:
+                    raise TimeoutError("CAN feedback stale during return settle")
+                return_motion = abs(raw_sample[0] - start_motor)
+                if return_motion > args.max_motion:
+                    session.command(0.0, 0.0, start_motor, 0.0)
+                    raise RuntimeError(
+                        f"Return motion limit exceeded: {return_motion:.4f} rad"
+                    )
             final = model_feedback(session.read_feedback(), direction)
             print_feedback("test return MuJoCo", final)
         finally:
@@ -200,6 +233,7 @@ def main():
             "mapped_control_test_at": utc_now(),
             "mapped_control_test_passed": passed,
             "mapped_control_test_visual": visual,
+            "mapped_control_test_return_settle_seconds": args.return_settle_seconds,
             "mapped_control_test_start_rad": start_model,
             "mapped_control_test_target_rad": target_model,
             "mapped_control_test_peak_rad": peak[0],
